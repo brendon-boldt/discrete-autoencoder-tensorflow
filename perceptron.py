@@ -10,9 +10,15 @@ import tensorflow_probability as tfp
 ROHC = tfp.distributions.RelaxedOneHotCategorical
 
 default_config = {
-    'vocab_size': 2,
     'batch_size': 1000,
+    'e_d0_size': 12,
+    'e_d1_size': 12,
+    'd_d0_size': 12,
+    'd_d1_size': 12,
     'sentence_len': 1,
+    'vocab_size': 3,
+    'input_len': 1,
+    'input_vals': [0., 1.]
 }
 
 config = default_config
@@ -32,18 +38,23 @@ def ohvs_to_words(ohvs):
     return sentence
 
 def main():
-    e_inputs = Input(shape=(1,))
+    e_inputs = Input(shape=(config['input_len'],))
     e_temp = Input(shape=(1,), dtype='float32')
     e_st = Input(shape=(1,), dtype='bool')
 
-    e_x = Dense(64,
-            kernel_initializer=RandomNormal())(e_inputs)
-    e_x = Dense(64, activation='relu')(e_x)
+    e_x = Dense(config['e_d0_size'],
+            kernel_initializer=RandomNormal(),
+            name='encoder_inputs')(e_inputs)
+    e_x = Dense(config['e_d1_size'],
+            activation='relu',
+            name='encoder_h0')(e_x)
     e_outputs = []
     alt_outputs = []
 
     for _ in range(config['sentence_len']):
-        logits = Dense(config['vocab_size'], activation=None)(e_x)
+        logits = Dense(config['vocab_size'],
+                activation=None,
+                name='encoder_logits')(e_x)
         alt_outputs.append(logits)
         categorical = lambda x: sampler(x, e_temp, e_st)
         e_outputs.append(keras.layers.Lambda(categorical)(logits))
@@ -53,17 +64,28 @@ def main():
             loss='categorical_crossentropy',
             metrics=['accuracy'])
 
-    d_input = Dense(8, activation='relu')
+    d_input = Dense(config['d_d0_size'],
+            activation='relu',
+            name='decoder_input')
     d_inputs = []
     for word in e_outputs:
         d_inputs.append(d_input(word))
 
-    d_x = d_inputs[0]
-    d_x = Dense(64, activation='relu')(d_x)
-    d_output = Dense(1, activation=None)(d_x)
+    # Keras doesn't like an array size of 1
+    if config['sentence_len'] == 1:
+        d_x = d_inputs[0]
+    else:
+        d_x = Concatenate()(d_inputs)
+    d_x = Dense(config['d_d1_size'],
+            activation='relu',
+            name='decoder_h0')(d_x)
+    d_output = Dense(config['sentence_len'], activation=None,
+            name='decoder_output')(d_x)
 
+    #optimizer = keras.optimizers.Adam()
+    optimizer = keras.optimizers.RMSprop(lr=0.01)
     model = Model(inputs=[e_inputs, e_temp, e_st], outputs=d_output)
-    model.compile(optimizer='rmsprop',
+    model.compile(optimizer=optimizer,
             loss='mean_squared_error',
             metrics=['accuracy'])
     sentence_model = Model(inputs=e_inputs, outputs=alt_outputs)
@@ -77,7 +99,9 @@ def main():
                 [temp]*config['batch_size'],
                 [True]*config['batch_size']]
         model.fit(input_data,
-                output_data, epochs=1)
+                output_data,
+                epochs=1,
+                verbose=0)
 
     predictions = model.predict(test_data)
     sentences = np.array([sentence_model.predict(np.array(test_data)[:,0])])
@@ -85,6 +109,7 @@ def main():
         print(test_data[i][0], ohvs_to_words(sentences[:,i]), predictions[i])
         print(test_data[i][0],sentences[:,i], predictions[i])
 
+    # Preven an error involving __del__
     import gc; gc.collect()
 
 
