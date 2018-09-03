@@ -11,25 +11,28 @@ ROHC = tfp.distributions.RelaxedOneHotCategorical
 
 default_config = {
     'batch_size': 1000,
+    'epochs': 30,
     'e_d0_size': 12,
     'e_d1_size': 12,
     'd_d0_size': 12,
     'd_d1_size': 12,
     'sentence_len': 1,
-    'vocab_size': 3,
+    'vocab_size': 2,
     'input_len': 1,
-    'input_vals': [0., 1.]
+    'input_dim': 1, # Not fully implemented
+    'input_vals': [-1., 0., 5.]
 }
 
 config = default_config
 
 def sampler(logits, temp, straight_through):
     dist = ROHC(temperature=temp, logits=logits)
-    y_hard = tf.one_hot(tf.argmax(dist.sample(),-1), config['vocab_size'])
+    sample = dist.sample()
+    y_hard = tf.one_hot(tf.argmax(sample, -1), config['vocab_size'])
     y = tf.stop_gradient(y_hard - logits) + logits
-    softmax = tf.nn.softmax(dist.sample())
+
     pred = tf.reshape(tf.slice(straight_through, [0,0], [1,1]), ())
-    return tf.where(pred, y, softmax)
+    return tf.where(pred, y, sample)
 
 def ohvs_to_words(ohvs):
     sentence = ""
@@ -51,10 +54,10 @@ def main():
     e_outputs = []
     alt_outputs = []
 
-    for _ in range(config['sentence_len']):
+    for i in range(config['sentence_len']):
         logits = Dense(config['vocab_size'],
                 activation=None,
-                name='encoder_logits')(e_x)
+                name='encoder_logits'+str(i))(e_x)
         alt_outputs.append(logits)
         categorical = lambda x: sampler(x, e_temp, e_st)
         e_outputs.append(keras.layers.Lambda(categorical)(logits))
@@ -79,11 +82,11 @@ def main():
     d_x = Dense(config['d_d1_size'],
             activation='relu',
             name='decoder_h0')(d_x)
-    d_output = Dense(config['sentence_len'], activation=None,
+    d_output = Dense(config['input_dim'], activation=None,
             name='decoder_output')(d_x)
 
-    #optimizer = keras.optimizers.Adam()
-    optimizer = keras.optimizers.RMSprop(lr=0.01)
+    optimizer = keras.optimizers.Adam()
+    #optimizer = keras.optimizers.RMSprop(lr=0.01)
     model = Model(inputs=[e_inputs, e_temp, e_st], outputs=d_output)
     model.compile(optimizer=optimizer,
             loss='mean_squared_error',
@@ -91,13 +94,16 @@ def main():
     sentence_model = Model(inputs=e_inputs, outputs=alt_outputs)
     sentence_model.compile(optimizer='rmsprop', loss='mean_squared_error')
 
-    test_data = np.transpose([[0., 1., True], [1., 1., True]]).tolist()
-    output_data = [0., 1.] * (config['batch_size']//2)
-    for i in range(30):
+    #test_data = np.transpose([[0., 1., True], [1., 1., True]]).tolist()
+    test_data = [config['input_vals'],
+            [1e-3]*len(config['input_vals']),
+            [True]*len(config['input_vals'])]
+    output_data = config['input_vals']*config['batch_size']
+    for i in range(config['epochs']):
         temp = 2/(i+1)
-        input_data = [[0.,1.]*(config['batch_size']//2),
-                [temp]*config['batch_size'],
-                [True]*config['batch_size']]
+        input_data = [config['input_vals']*config['batch_size'],
+                [temp]*config['batch_size']*len(config['input_vals']),
+                [False]*config['batch_size']*len(config['input_vals'])]
         model.fit(input_data,
                 output_data,
                 epochs=1,
@@ -106,11 +112,9 @@ def main():
     predictions = model.predict(test_data)
     sentences = np.array([sentence_model.predict(np.array(test_data)[:,0])])
     for i in range(len(predictions)):
-        print(test_data[i][0], ohvs_to_words(sentences[:,i]), predictions[i])
-        print(test_data[i][0],sentences[:,i], predictions[i])
+        print(test_data[0][i], ohvs_to_words(sentences[:,i]), predictions[i])
+        print(test_data[0][i],sentences[:,i], predictions[i])
 
-    # Preven an error involving __del__
-    import gc; gc.collect()
 
 
 if __name__ == "__main__":
