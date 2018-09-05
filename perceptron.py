@@ -16,7 +16,7 @@ default_config = {
     'e_d1_size': 12,
     'd_d0_size': 12,
     'd_d1_size': 12,
-    'sentence_len': 1,
+    'sentence_len': 4,
     'vocab_size': 2,
     'input_len': 1,
     'input_dim': 1, # Not fully implemented
@@ -91,7 +91,8 @@ def main():
     model.compile(optimizer=optimizer,
             loss='mean_squared_error',
             metrics=['accuracy'])
-    sentence_model = Model(inputs=e_inputs, outputs=alt_outputs)
+    #sentence_model = Model(inputs=e_inputs, outputs=alt_outputs)
+    sentence_model = Model(inputs=[e_inputs, e_temp, e_st], outputs=e_outputs)
     sentence_model.compile(optimizer='rmsprop', loss='mean_squared_error')
 
     #test_data = np.transpose([[0., 1., True], [1., 1., True]]).tolist()
@@ -103,19 +104,27 @@ def main():
         temp = 2/(i+1)
         input_data = [config['input_vals']*config['batch_size'],
                 [temp]*config['batch_size']*len(config['input_vals']),
-                [False]*config['batch_size']*len(config['input_vals'])]
+                [True]*config['batch_size']*len(config['input_vals'])]
         model.fit(input_data,
                 output_data,
                 epochs=1,
                 verbose=0)
 
     predictions = model.predict(test_data)
-    sentences = np.array([sentence_model.predict(np.array(test_data)[:,0])])
+    sentences = np.array([sentence_model.predict(test_data)])
+    if config['sentence_len'] == 1:
+        sentences = np.array([[sentences[0]], [sentences[1]]])
+    #import pdb; pdb.set_trace()
     for i in range(len(predictions)):
-        print(test_data[0][i], ohvs_to_words(sentences[:,i]), predictions[i])
-        print(test_data[0][i],sentences[:,i], predictions[i])
+        print(test_data[0][i], ohvs_to_words(sentences[0,:,i]), predictions[i])
+        #print(test_data[0][i],sentences[0,:,i], predictions[i])
+
+    sess = keras.backend.get_session()
+    del sess
 
 
 
 if __name__ == "__main__":
-    main()
+    for _ in range(2):
+        main()
+        print("=======================")
