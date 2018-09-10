@@ -8,22 +8,49 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 ROHC = tfp.distributions.RelaxedOneHotCategorical
+np.set_printoptions(precision=2, sign=' ')
+
+
+def astr(arr):
+    """Convert an array to nice string"""
+    strs = ["%.2f " % (x,) for x in arr]
+    return " ".join(strs)
 
 default_config = {
     'batch_size': 1000,
     'epochs': 30,
-    'e_d0_size': 12,
-    'e_d1_size': 12,
-    'd_d0_size': 12,
-    'd_d1_size': 12,
-    'sentence_len': 4,
+    'e_d0_size': 6,
+    'e_d1_size': 6,
+    'd_d0_size': 6,
+    'd_d1_size': 6,
+    'sentence_len': 3,
     'vocab_size': 2,
-    'input_len': 1,
-    'input_dim': 1, # Not fully implemented
-    'input_vals': [-1., 0., 5.]
+    'input_dim': 3,
+    'input_vocab_size': 4,
 }
 
 config = default_config
+
+class DistConfig:
+    def __init__(self):
+        self.m_mean = 0.0
+        self.m_variance = 1.0
+        self.v_mean = 0.0
+        self.v_variance = 0.25
+
+def generate_embeddings(size, dims, config=None):
+    config = config or DistConfig()
+    means = np.random.normal(config.m_mean, config.m_variance, (dims,))
+    variances = np.random.lognormal(config.v_mean, config.v_variance, (dims,))
+    words = []
+    for _ in range(size):
+        words.append(np.random.multivariate_normal(means, np.diag(variances)))
+    return np.array(words)
+
+
+config['input_vals'] = generate_embeddings(
+        config['input_vocab_size'],
+        config['input_dim'])
 
 def sampler(logits, temp, straight_through):
     dist = ROHC(temperature=temp, logits=logits)
@@ -41,7 +68,7 @@ def ohvs_to_words(ohvs):
     return sentence
 
 def main():
-    e_inputs = Input(shape=(config['input_len'],))
+    e_inputs = Input(shape=(config['input_dim'],))
     e_temp = Input(shape=(1,), dtype='float32')
     e_st = Input(shape=(1,), dtype='bool')
 
@@ -97,18 +124,25 @@ def main():
 
     #test_data = np.transpose([[0., 1., True], [1., 1., True]]).tolist()
     test_data = [config['input_vals'],
-            [1e-3]*len(config['input_vals']),
-            [True]*len(config['input_vals'])]
-    output_data = config['input_vals']*config['batch_size']
+            np.repeat([1e-3], len(config['input_vals'])),
+            np.repeat([True], len(config['input_vals']))]
+    output_data = np.repeat(config['input_vals'], config['batch_size'], axis=0)
+    temp = 10
+    temp_decay = 0.8
     for i in range(config['epochs']):
-        temp = 2/(i+1)
-        input_data = [config['input_vals']*config['batch_size'],
-                [temp]*config['batch_size']*len(config['input_vals']),
-                [True]*config['batch_size']*len(config['input_vals'])]
+        input_data = [np.repeat(config['input_vals'], config['batch_size'], axis=0),
+                np.repeat([temp], config['batch_size']*len(config['input_vals'])),
+                np.repeat([True], config['batch_size']*len(config['input_vals']))]
         model.fit(input_data,
                 output_data,
                 epochs=1,
                 verbose=0)
+        sentences = np.array([sentence_model.predict(test_data)])
+        unique = np.unique(sentences, axis=2).shape[2]
+        print(unique)
+        if unique >= config['input_vals'].shape[0]:
+            temp *= temp_decay
+            
 
     predictions = model.predict(test_data)
     sentences = np.array([sentence_model.predict(test_data)])
@@ -119,7 +153,7 @@ def main():
         print(test_data[0][i], ohvs_to_words(sentences[0,:,i]), predictions[i])
         #print(test_data[0][i],sentences[0,:,i], predictions[i])
 
-    sess = keras.backend.get_session()
+    sess = K.get_session()
     del sess
 
 
