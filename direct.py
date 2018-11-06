@@ -1,7 +1,7 @@
 import numpy as np
 import keras
 from keras.models import Sequential, Model
-from keras.layers import Dense, Dropout, Embedding, Input, Concatenate
+from keras.layers import Dense, Dropout, Embedding, Input, Concatenate, BatchNormalization
 from keras.initializers import RandomNormal
 from keras import backend as K
 import tensorflow as tf
@@ -75,9 +75,12 @@ def main():
     e_x = Dense(config['e_d0_size'],
             kernel_initializer=RandomNormal(),
             name='encoder_inputs')(e_inputs)
+    '''
     e_x = Dense(config['e_d1_size'],
             activation='relu',
             name='encoder_h0')(e_x)
+    '''
+    e_x = BatchNormalization()(e_x)
     e_outputs = []
     alt_outputs = []
 
@@ -106,9 +109,12 @@ def main():
         d_x = d_inputs[0]
     else:
         d_x = Concatenate()(d_inputs)
+    d_x = BatchNormalization()(d_x)
+    '''
     d_x = Dense(config['d_d1_size'],
             activation='relu',
             name='decoder_h0')(d_x)
+    '''
     d_output = Dense(config['input_dim'], activation=None,
             name='decoder_output')(d_x)
 
