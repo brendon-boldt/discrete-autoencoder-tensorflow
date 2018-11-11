@@ -1,12 +1,4 @@
 import numpy as np
-'''
-import keras
-from keras.models import Model
-from keras.layers import (Dense, Dropout, Input, Concatenate,
-        BatchNormalization, RepeatVector, Lambda, Flatten)
-from keras.initializers import RandomNormal
-from keras import backend as K
-'''
 import tensorflow as tf
 import tensorflow.keras
 from tensorflow.keras.models import Model
@@ -20,18 +12,6 @@ ROHC = tfp.distributions.RelaxedOneHotCategorical
 np.set_printoptions(precision=2, sign=' ')
 #np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
 
-default_config = {
-    'batch_size': 600,
-    'epochs': 15,
-    'e_d0_size': 30,
-    'e_d1_size': 30,
-    'd_d0_size': 30,
-    'd_d1_size': 30,
-    'sentence_len': 8,
-    'vocab_size': 2,
-    'input_dim': 5,
-    'input_vocab_size': 4,
-}
 
 def sampler(logits, temp, size, straight_through):
     """Sampling function for Gumbel-Softmax"""
@@ -56,24 +36,29 @@ class AgentPair:
         e_st = Input(shape=(1,), dtype='bool', name='e_st')
 
         # Generate a static vector space of "concepts"
-        e_x0 = Dense(self.cfg['input_dim'],
+        e_x = Dense(self.cfg['input_dim'],
                 trainable=False,
                 kernel_initializer=RandomNormal(),
                 use_bias=False,
                 name='concept_space',)(e_inputs)
 
         # Dense layer for encocder
-        e_x1 = Dense(self.cfg['e_d1_size'],
+        e_x = Dense(self.cfg['e_d1_size'],
                 activation='relu',
-                name='encoder_h0')(e_x0)
+                name='encoder_h0')(e_x)
         #e_x2 = BatchNormalization()(e_x1)
-        e_x2 = tf.layers.batch_normalization(e_x1, renorm=True)
-        e_x3 = RepeatVector(self.cfg['sentence_len'])(e_x2)
-        e_x4 = Dense(self.cfg['vocab_size'], name="encoder_word_dense")(e_x3)
+        #e_x2 = tf.layers.batch_normalization(e_x1)
+        e_x = tf.layers.batch_normalization(e_x, renorm=True)
+        e_x = Dense(self.cfg['vocab_size']*self.cfg['sentence_len'],
+                name="encoder_word_dense")(e_x)
+        #e_x3 = RepeatVector(self.cfg['sentence_len'])(e_x2)
+        #e_x4 = Dense(self.cfg['vocab_size'], name="encoder_word_dense")(e_x3)
+        e_x = tf.keras.layers.Reshape((self.cfg['sentence_len'],
+                self.cfg['vocab_size']))(e_x)
 
         categorical = lambda x: (
             sampler(x, e_temp, self.cfg['vocab_size'], e_st))
-        e_output = Lambda(categorical)(e_x4)
+        self.e_output = Lambda(categorical)(e_x)
 
 
         '''
@@ -94,53 +79,91 @@ class AgentPair:
         # Decoder input
         d_x0 = Dense(self.cfg['d_d0_size'],
                 activation='relu',
-                name='decoder_input')(e_output)
-        d_x1 = BatchNormalization()(d_x0)
-        d_x2 = Flatten(name='decoder_flatten')(d_x1)
+                name='decoder_input')(self.e_output)
+        #d_x1 = BatchNormalization()(d_x0)
+        d_x1 = Flatten(name='decoder_flatten')(d_x0)
+        d_x2 = tf.layers.batch_normalization(d_x1, renorm=True)
 
         d_x3 = Dense(self.cfg['input_dim'], activation=None,
                 name='decoder_output')(d_x2)
         d_output = Dense(self.cfg['input_vocab_size'],
                 name="decoder_class",
                 activation=None,)(d_x3)
-        d_softmax = tf.nn.softmax(d_output)
+        self.d_softmax = tf.nn.softmax(d_output)
 
         e_inputs = tf.stop_gradient(e_inputs)
         optmizier = tf.train.AdamOptimizer()
-        loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-                logits=d_output, labels=e_inputs)
-        #loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                #logits=d_output, labels=tf.argmax(e_inputs))
-        train = optmizier.minimize(loss)
+        #self.loss = tf.nn.softmax_cross_entropy_with_logits_v2(
+                #logits=d_output, labels=e_inputs)
+        self.loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                logits=d_output, labels=tf.argmax(e_inputs, axis=-1))
 
-        sess = K.get_session()
-        sess.run(tf.initializers.global_variables())
+        #self.loss = e_inputs * -tf.log(self.d_softmax+1e-8)
 
-        train_fd = {
-            'e_oh:0': np.random.permutation(np.repeat(np.identity(4), 10, axis=0)),
-            'e_temp:0': [[5]],
-            'e_st:0': [[0]],
+        self.train = optmizier.minimize(self.loss)
+
+
+        train_input = np.random.permutation(np.repeat(
+            np.identity(self.cfg['input_vocab_size']), self.cfg['batch_size'], axis=0))
+
+        self.train_fd = {
+            'e_oh:0': train_input,
+            'e_temp:0': [[self.cfg['temp_init']]],
+            'e_st:0': [[self.cfg['train_st']]],
         }
 
-        test_fd = {
-            'e_oh:0': np.identity(4),
-            'e_temp:0': [[1]],
+        self.test_fd = {
+            'e_oh:0': np.identity(self.cfg['input_vocab_size']),
+            'e_temp:0': [[1e-8]],
             'e_st:0': [[1]],
         }
-        temp_decay = 0.9
         #for i in range(self.cfg['epochs']*self.cfg['batch_size']):
-        for i in range(5000):
-            sess.run(train, feed_dict=train_fd)
-            if i % 500 == 0:
-                loss_val =sess.run(loss, feed_dict=test_fd) 
-                train_fd['e_temp:0'][0][0] *= temp_decay
-                print(loss_val)
 
-        np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
-        results = sess.run(d_softmax, feed_dict=test_fd)
-        print(results)
+    def run(self):
+        sess = K.get_session()
+        sess.run(tf.initializers.global_variables())
+        for i in range(self.cfg['epochs']):
+            sess.run(self.train, feed_dict=self.train_fd)
+            if i % 200 == 0:
+                loss_val =sess.run(self.loss, feed_dict=self.test_fd) 
+                #print(np.average(loss_val))
+                #print('>'+'#'* int(10*np.average(loss_val)))
+                e_out = sess.run(self.e_output, feed_dict=self.test_fd)
+                unique = np.unique(e_out, axis=0).shape[0]
+                #print(f'{unique} ', end='')
+                #if unique >= self.cfg['input_vocab_size']:
+                self.train_fd['e_temp:0'][0][0] *= self.cfg['temp_decay']
+                #self.train_fd['e_temp:0'][0][0] /= self.cfg['temp_decay']
 
+        results = sess.run(self.d_softmax, feed_dict=self.test_fd)
+        score = sum([1 for i,r in enumerate(results) if i == np.argmax(r)])
+        #my_loss = np.zeros((4,))
+        loss_val =sess.run(self.loss, feed_dict=self.test_fd) 
+        #print(results)
+        #print(loss_val)
+        print(f"{score}/{self.cfg['input_vocab_size']}")
+
+default_config = {
+    'batch_size': 32 // 4,
+    'epochs': 8000,
+    #'e_d0_size': 30,
+    'e_d1_size': 30,
+    'd_d0_size': 30,
+    #'d_d1_size': 30,
+    'sentence_len': 4,
+    'vocab_size': 4,
+    'input_dim': 5,
+    'input_vocab_size': 10,
+    'temp_init': 5,
+    'temp_decay': 0.9,
+    'train_st': 0,
+}
 
 if __name__ == '__main__':
+    np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
     cfg = default_config
-    ap = AgentPair(cfg)
+    for _ in range(10):
+        ag = AgentPair(cfg)
+        ag.run()
+        K.clear_session()
+        tf.reset_default_graph()
