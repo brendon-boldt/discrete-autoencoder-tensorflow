@@ -1,9 +1,10 @@
 import numpy as np
-import keras
-from keras.models import Sequential, Model
-from keras.layers import Dense, Dropout, Embedding, Input, Concatenate, BatchNormalization
-from keras.initializers import RandomNormal
-from keras import backend as K
+import tensorflow.keras
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import (Dense, Dropout, Embedding, Input, Concatenate,
+        Lambda, BatchNormalization, RepeatVector, Flatten)
+from tensorflow.keras.initializers import RandomNormal
+from tensorflow.keras import backend as K
 import tensorflow as tf
 import tensorflow_probability as tfp
 
@@ -24,10 +25,10 @@ default_config = {
     'e_d1_size': 30,
     'd_d0_size': 30,
     'd_d1_size': 30,
-    'sentence_len': 8,
-    'vocab_size': 2,
-    'input_dim': 100,
-    'input_vocab_size': 100,
+    'sentence_len': 3,
+    'vocab_size': 4,
+    'input_dim': 5,
+    'input_vocab_size': 4,
 }
 
 config = default_config
@@ -55,8 +56,12 @@ config['input_vals'] = generate_embeddings(
         config['input_dim'])
 
 def sampler(logits, temp, straight_through):
+#def sampler(logits, temp, size, straight_through):
+    temp = tf.slice(temp, [0,0], [1,1])
     dist = ROHC(temperature=temp, logits=logits)
+    #dist = ROHC(temperature=1, logits=logits)
     sample = dist.sample()
+    #y_hard = tf.one_hot(tf.argmax(sample, -1), size)
     y_hard = tf.one_hot(tf.argmax(sample, -1), config['vocab_size'])
     y = tf.stop_gradient(y_hard - logits) + logits
 
@@ -99,34 +104,63 @@ def main():
             activation='relu',
             name='encoder_h0')(e_x)
     e_x = BatchNormalization()(e_x)
-    e_outputs = []
-    alt_outputs = []
 
-    for i in range(config['sentence_len']):
-        logits = Dense(config['vocab_size'],
-                activation=None,
-                name='encoder_logits'+str(i))(e_x)
-        alt_outputs.append(logits)
-        categorical = lambda x: sampler(x, e_temp, e_st)
-        e_outputs.append(keras.layers.Lambda(categorical)(logits))
+    
+    if False:
+        ### Begin Original Code ###
+        e_outputs = []
+        alt_outputs = []
 
-    e_model = Model(inputs=e_inputs, outputs=e_outputs)
-    e_model.compile(optimizer='rmsprop',
-            loss='categorical_crossentropy',
-            metrics=['accuracy'])
+        for i in range(config['sentence_len']):
+            D = Dense(config['vocab_size'],
+                    activation=None,
+                    name='encoder_logits'+str(i))
+            logits = D(e_x)
+            import pdb; pdb.set_trace()
+            alt_outputs.append(logits)
+            categorical = lambda x: sampler(x, e_temp, e_st)
+            e_outputs.append(tf.keras.layers.Lambda(categorical)(logits))
 
-    d_input = Dense(config['d_d0_size'],
-            activation='relu',
-            name='decoder_input')
-    d_inputs = []
-    for word in e_outputs:
-        d_inputs.append(d_input(word))
+        #e_model = Model(inputs=e_inputs, outputs=e_outputs)
+        #e_model.compile(optimizer='rmsprop',
+                #loss='categorical_crossentropy',
+                #metrics=['accuracy'])
 
-    # Keras doesn't like an array size of 1
-    if config['sentence_len'] == 1:
-        d_x = d_inputs[0]
-    else:
-        d_x = Concatenate()(d_inputs)
+        d_input = Dense(config['d_d0_size'],
+                activation='relu',
+                name='decoder_input')
+        d_inputs = []
+        for word in e_outputs:
+            d_inputs.append(d_input(word))
+
+        # Keras doesn't like an array size of 1
+        if config['sentence_len'] == 1:
+            d_x = d_inputs[0]
+        else:
+            d_x = Concatenate()(d_inputs)
+    if True:
+        ### Begin New Code ###
+        e_x3 = RepeatVector(config['sentence_len'])(e_x)
+        D = Dense(config['vocab_size'], name="encoder_word_dense")
+        e_x4 = D(e_x3)
+        import pdb; pdb.set_trace()
+
+        categorical = lambda x: (
+            sampler(x, e_temp, e_st))
+        e_outputs = Lambda(categorical)(e_x4)
+        #e_outputs = e_x4
+
+        d_x0 = Dense(config['d_d0_size'],
+                activation='relu',
+                name='decoder_input')(e_outputs)
+        #d_x1 = tf.layers.batch_normalization(d_x0, renorm=True, name='decoder_bn')
+        #d_x1 = d_x0
+        d_x = Flatten(name='decoder_flatten')(d_x0)
+        #d_x = BatchNormalization()(d_x)
+
+        ### End New Code ###
+
+
     ''' Don't need
     d_x = Dense(config['d_d1_size'],
             activation='relu',
@@ -139,12 +173,13 @@ def main():
             name="decoder_class",
             activation='softmax',)(d_output)
 
-    optimizer = keras.optimizers.Adam()
+    optimizer = tensorflow.keras.optimizers.Adam()
     #optimizer = keras.optimizers.RMSprop(lr=0.01)
     #model = Model(inputs=[e_inputs, e_temp, e_st], outputs=d_output)
     model = Model(inputs=[e_inputs, e_temp, e_st], outputs=d_class)
     model.compile(optimizer=optimizer,
-            loss='mean_squared_error',
+            #loss='mean_squared_error',
+            loss='categorical_crossentropy',
             metrics=['accuracy'])
     #sentence_model = Model(inputs=e_inputs, outputs=alt_outputs)
     sentence_model = Model(inputs=[e_inputs, e_temp, e_st], outputs=e_outputs)
@@ -174,7 +209,10 @@ def main():
                 shuffle=True,)
         sentences = np.array([sentence_model.predict(test_data)])
         unique = np.unique(sentences, axis=2).shape[2]
-        print(unique, end=' ')
+        predictions = model.predict(test_data)
+        score = sum([1 for i, r in enumerate(predictions) if np.argmax(r) == i])
+        print(f"{score}/{config['input_vocab_size']}")
+        #print(unique, end=' ')
         if unique >= config['input_vals'].shape[0]:
             temp *= temp_decay
         else:
