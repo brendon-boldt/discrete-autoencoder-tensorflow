@@ -35,11 +35,13 @@ def tt_split(arr, test_split=1.0):
             else:
                 train.append(i)
         else:
-            if matrix_rank(covered + [arr[i]]) > mr_covered:
-                covered.append(arr[i])
-                train.append(i)
-            else:
-                test.append(i)
+            covered.append(arr[i])
+            train.append(i)
+            #if matrix_rank(covered + [arr[i]]) > mr_covered:
+            #    covered.append(arr[i])
+            #    train.append(i)
+            #else:
+            #    test.append(i)
 
     return train, test 
 
@@ -60,6 +62,9 @@ def sampler(logits, temp, size, straight_through):
 
     return tf.cond(straight_through, lambda: y, lambda: sample)
 
+def identityInitializer(shape, **kwargs):
+    return np.identity(shape[0])
+
 class AgentPair:
 
     def __init__(self, cfg):
@@ -68,6 +73,8 @@ class AgentPair:
 
         droput_rate = tf.placeholder(tf.bool, shape=(),
                 name='droput_rate')
+        use_argmax = tf.placeholder(tf.bool, shape=(),
+                name='use_argmax')
 
         # Encoder inputs
         e_inputs = Input(shape=(cfg['num_concepts'],), name='e_input')
@@ -75,9 +82,11 @@ class AgentPair:
         e_st = tf.placeholder(tf.bool, shape=(), name='e_st')
 
         # Generate a static vector space of "concepts"
-        e_x = Dense(cfg['input_dim'],
+        #e_x = Dense(cfg['input_dim'],
+        e_x = Dense(cfg['num_concepts'],
                 trainable=False,
-                kernel_initializer=RandomNormal(),
+                #kernel_initializer=RandomNormal(0., 2.),
+                kernel_initializer=identityInitializer,
                 use_bias=False,
                 name='concept_space',)(e_inputs)
 
@@ -101,7 +110,9 @@ class AgentPair:
         # Generate GS sampling layer
         categorical = lambda x: (
             sampler(x, e_temp, cfg['vocab_size'], e_st))
-        self.e_output = Lambda(categorical)(e_x)
+        self.e_output = tf.cond(use_argmax,
+                lambda: tf.one_hot(tf.argmax(e_x, -1), e_x.shape[-1]),
+                lambda: Lambda(categorical)(e_x))
 
 
         
@@ -145,14 +156,16 @@ class AgentPair:
             'e_temp:0': cfg['temp_init'],
             'e_st:0': cfg['train_st'],
             'droput_rate:0': cfg['droput_rate'],
+            'use_argmax:0': False,
         }
 
         self.test_fd = {
             'e_input:0': test_input,
             #'e_input:0': [[0,0,0,0]]*10,
-            'e_temp:0': 1e-8,
+            'e_temp:0': 1e-8, # Not used
             'e_st:0': 1,
             'droput_rate:0': 0.,
+            'use_argmax:0': True,
         }
 
     def run(self):
@@ -172,9 +185,12 @@ class AgentPair:
         #results = self.sess.run(self.d_sigmoid, feed_dict=self.train_fd)
         #test_input = self.train_fd['e_input:0'] 
         #print(self.sess.run(self.e_output, feed_dict=self.test_fd))
+        test_loss = self.sess.run(self.loss, feed_dict=self.test_fd)
+        print('\ntest_loss')
         for i in range(len(test_input)):
             sent = ohvs_to_words(utt[i])
-            print(f'{test_input[i]} -> {sent} -> {results[i]}')
+            #print(f'{test_input[i]} -> {sent} -> {results[i]}')
+            print(np.average(test_loss[i]))
         print()
         #score = sum([1 for i,r in enumerate(results) if i == np.argmax(r)])
         #print(f"{score}/{self.cfg['num_concepts']}")
@@ -182,22 +198,22 @@ class AgentPair:
 default_config = {
     # Actual batch_size == batch_size * num_concepts
     'batch_size': 4,
-    'epochs': 10000,
+    'epochs': 7000,
      # How often to anneal temperature
      # More like a traditional epoch due to small dataset size
     'superepoch': 200,
-    'e_dense_size': 4,
-    'd_dense_size': 4,
-    'sentence_len': 4,
+    'e_dense_size': 30,
+    'd_dense_size': 30,
+    'input_dim': 8,
+    'num_concepts': 6,
+    'sentence_len': 6,
     'vocab_size': 2,
-    'input_dim': 5,
-    'num_concepts': 4,
 
     'temp_init': 5,
     'temp_decay': 0.9,
     'train_st': 0,
-    'test_prop': 0.3,
-    'droput_rate': 0.1,
+    'test_prop': 0.1,
+    'droput_rate': 0.3,
     
     'verbose': True,
 }
