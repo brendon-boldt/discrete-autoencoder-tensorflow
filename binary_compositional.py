@@ -43,6 +43,11 @@ def tt_split(arr, test_split=1.0):
 
     return train, test 
 
+def ohvs_to_words(ohvs):
+    sentence = ""
+    for v in ohvs:
+        sentence += chr(ord('a')+np.argmax(v))
+    return sentence
 
 
 def sampler(logits, temp, size, straight_through):
@@ -53,9 +58,7 @@ def sampler(logits, temp, size, straight_through):
     # y_hard is the value that gets used but the gradient flows through logits
     y = tf.stop_gradient(y_hard - logits) + logits
 
-    # TODO Make this make more sense
-    pred = tf.reshape(tf.slice(straight_through, [0,0], [1,1]), ())
-    return tf.where(pred, y, sample)
+    return tf.cond(straight_through, lambda: y, lambda: sample)
 
 class AgentPair:
 
@@ -63,10 +66,13 @@ class AgentPair:
         self.cfg = cfg
         self.sess = tf.Session()
 
+        droput_rate = tf.placeholder(tf.bool, shape=(),
+                name='droput_rate')
+
         # Encoder inputs
-        e_inputs = Input(shape=(cfg['num_concepts'],), name='e_oh')
-        e_temp = Input(shape=(1,), dtype='float32', name='e_temp')
-        e_st = Input(shape=(1,), dtype='bool', name='e_st')
+        e_inputs = Input(shape=(cfg['num_concepts'],), name='e_input')
+        e_temp = tf.placeholder(tf.float32, shape=(), name='e_temp')
+        e_st = tf.placeholder(tf.bool, shape=(), name='e_st')
 
         # Generate a static vector space of "concepts"
         e_x = Dense(cfg['input_dim'],
@@ -79,18 +85,24 @@ class AgentPair:
         e_x = Dense(cfg['e_dense_size'],
                 activation='relu',
                 name='encoder_h0')(e_x)
-        e_x = tf.layers.batch_normalization(e_x, renorm=True)
+        #e_x = tf.layers.batch_normalization(e_x, renorm=True)
         # The generic keras BN was NaN'ing, but tf.keras might be okay
         #e_x = BatchNormalization()(e_x)
         e_x = Dense(cfg['vocab_size']*cfg['sentence_len'],
                 name="encoder_word_dense")(e_x)
+
+        self.e_dropout = tf.layers.dropout(e_x,
+                #noise_shape=(None,
+                rate=droput_rate)
+
         e_x = tf.keras.layers.Reshape((cfg['sentence_len'],
-                cfg['vocab_size']))(e_x)
+                cfg['vocab_size']))(self.e_dropout)
 
         # Generate GS sampling layer
         categorical = lambda x: (
             sampler(x, e_temp, cfg['vocab_size'], e_st))
         self.e_output = Lambda(categorical)(e_x)
+
 
         
         # Decoder input
@@ -129,16 +141,18 @@ class AgentPair:
         test_input = all_input[test_i]
 
         self.train_fd = {
-            'e_oh:0': train_input,
-            'e_temp:0': [[cfg['temp_init']]],
-            'e_st:0': [[cfg['train_st']]],
+            'e_input:0': train_input,
+            'e_temp:0': cfg['temp_init'],
+            'e_st:0': cfg['train_st'],
+            'droput_rate:0': cfg['droput_rate'],
         }
 
         self.test_fd = {
-            # TODO change this tensor name since it is no longer accurate
-            'e_oh:0': test_input,
-            'e_temp:0': [[1e-8]],
-            'e_st:0': [[1]],
+            'e_input:0': test_input,
+            #'e_input:0': [[0,0,0,0]]*10,
+            'e_temp:0': 1e-8,
+            'e_st:0': 1,
+            'droput_rate:0': 0.,
         }
 
     def run(self):
@@ -146,16 +160,21 @@ class AgentPair:
         for i in range(self.cfg['epochs']):
             self.sess.run(self.train, feed_dict=self.train_fd)
             if i % self.cfg['superepoch'] == 0:
-                self.train_fd['e_temp:0'][0][0] *= self.cfg['temp_decay']
+                self.train_fd['e_temp:0'] *= self.cfg['temp_decay']
                 if self.cfg['verbose']:
+                    loss = self.sess.run(self.loss, feed_dict=self.train_fd)
+                    print(loss.mean())
                     pass
 
         results = self.sess.run(self.d_sigmoid, feed_dict=self.test_fd)
-        test_input = self.test_fd['e_oh:0'] 
+        utt = self.sess.run(self.e_output, feed_dict=self.test_fd)
+        test_input = self.test_fd['e_input:0'] 
         #results = self.sess.run(self.d_sigmoid, feed_dict=self.train_fd)
-        #test_input = self.train_fd['e_oh:0'] 
+        #test_input = self.train_fd['e_input:0'] 
+        #print(self.sess.run(self.e_output, feed_dict=self.test_fd))
         for i in range(len(test_input)):
-            print(f'{test_input[i]} -> {results[i]}')
+            sent = ohvs_to_words(utt[i])
+            print(f'{test_input[i]} -> {sent} -> {results[i]}')
         print()
         #score = sum([1 for i,r in enumerate(results) if i == np.argmax(r)])
         #print(f"{score}/{self.cfg['num_concepts']}")
@@ -163,22 +182,24 @@ class AgentPair:
 default_config = {
     # Actual batch_size == batch_size * num_concepts
     'batch_size': 4,
-    'epochs': 2000,
+    'epochs': 10000,
      # How often to anneal temperature
      # More like a traditional epoch due to small dataset size
-    'superepoch': 100,
+    'superepoch': 200,
     'e_dense_size': 4,
     'd_dense_size': 4,
     'sentence_len': 4,
     'vocab_size': 2,
     'input_dim': 5,
     'num_concepts': 4,
+
     'temp_init': 5,
     'temp_decay': 0.9,
-    'train_st': 1,
-    'test_prop': 0.4,
+    'train_st': 0,
+    'test_prop': 0.3,
+    'droput_rate': 0.1,
     
-    'verbose': False,
+    'verbose': True,
 }
 
 if __name__ == '__main__':
