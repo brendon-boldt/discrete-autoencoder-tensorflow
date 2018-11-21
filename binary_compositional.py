@@ -67,11 +67,42 @@ def identityInitializer(shape, **kwargs):
 
 class AgentPair:
 
+    def generate_data(self):
+        #train_input = np.random.permutation(np.repeat(
+            #np.identity(cfg['num_concepts']), cfg['batch_size'], axis=0))
+        all_input = permutations(cfg['num_concepts'])
+        train_i, test_i = tt_split(all_input, cfg['test_prop'])
+        train_i = np.repeat(train_i, cfg['batch_size'], axis=0)
+        shuffle(train_i)
+
+        train_input = all_input[train_i]
+        test_input = all_input[test_i]
+
+        self.train_fd = {
+            'e_input:0': train_input,
+            'e_temp:0': cfg['temp_init'],
+            'e_st:0': cfg['train_st'],
+            'droput_rate:0': cfg['droput_rate'],
+            'use_argmax:0': False,
+        }
+
+        self.test_fd = {
+            'e_input:0': test_input,
+            #'e_input:0': [[0,0,0,0]]*10,
+            'e_temp:0': 1e-8, # Not used
+            'e_st:0': 1,
+            'droput_rate:0': 0.,
+            'use_argmax:0': True,
+        }
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.sess = tf.Session()
 
-        droput_rate = tf.placeholder(tf.bool, shape=(),
+        self.generate_data()
+        real_batch_size = self.train_fd['e_input:0'].shape[0]
+
+        droput_rate = tf.placeholder(tf.float32, shape=(),
                 name='droput_rate')
         use_argmax = tf.placeholder(tf.bool, shape=(),
                 name='use_argmax')
@@ -100,12 +131,9 @@ class AgentPair:
         e_x = Dense(cfg['vocab_size']*cfg['sentence_len'],
                 name="encoder_word_dense")(e_x)
 
-        self.e_dropout = tf.layers.dropout(e_x,
-                #noise_shape=(None,
-                rate=droput_rate)
 
         e_x = tf.keras.layers.Reshape((cfg['sentence_len'],
-                cfg['vocab_size']))(self.e_dropout)
+                cfg['vocab_size']))(e_x)
 
         # Generate GS sampling layer
         categorical = lambda x: (
@@ -114,7 +142,11 @@ class AgentPair:
                 lambda: tf.one_hot(tf.argmax(e_x, -1), e_x.shape[-1]),
                 lambda: Lambda(categorical)(e_x))
 
-
+        self.e_output = tf.layers.dropout(self.e_output,
+                noise_shape=(real_batch_size, cfg['sentence_len'], 1),
+                #noise_shape=(real_batch_size, 6, 1),
+                rate=droput_rate,
+                training=tf.logical_not(use_argmax),)
         
         # Decoder input
         d_x = Flatten(name='decoder_flatten')(self.e_output)
@@ -141,33 +173,6 @@ class AgentPair:
 
         self.train = optmizier.minimize(self.loss)
 
-        #train_input = np.random.permutation(np.repeat(
-            #np.identity(cfg['num_concepts']), cfg['batch_size'], axis=0))
-        all_input = permutations(cfg['num_concepts'])
-        train_i, test_i = tt_split(all_input, cfg['test_prop'])
-        train_i = np.repeat(train_i, cfg['batch_size'], axis=0)
-        shuffle(train_i)
-
-        train_input = all_input[train_i]
-        test_input = all_input[test_i]
-
-        self.train_fd = {
-            'e_input:0': train_input,
-            'e_temp:0': cfg['temp_init'],
-            'e_st:0': cfg['train_st'],
-            'droput_rate:0': cfg['droput_rate'],
-            'use_argmax:0': False,
-        }
-
-        self.test_fd = {
-            'e_input:0': test_input,
-            #'e_input:0': [[0,0,0,0]]*10,
-            'e_temp:0': 1e-8, # Not used
-            'e_st:0': 1,
-            'droput_rate:0': 0.,
-            'use_argmax:0': True,
-        }
-
     def run(self):
         self.sess.run(tf.initializers.global_variables())
         for i in range(self.cfg['epochs']):
@@ -176,6 +181,8 @@ class AgentPair:
                 self.train_fd['e_temp:0'] *= self.cfg['temp_decay']
                 if self.cfg['verbose']:
                     loss = self.sess.run(self.loss, feed_dict=self.train_fd)
+                    #print(self.sess.run(self.e_output,
+                    #    feed_dict=self.train_fd))
                     print(loss.mean())
                     pass
 
