@@ -6,6 +6,8 @@ from tensorflow.keras.layers import (Dense, Dropout, Input, Concatenate,
         BatchNormalization, RepeatVector, Lambda, Flatten)
 from tensorflow.keras.initializers import RandomNormal
 import tensorflow_probability as tfp
+from numpy.random import shuffle
+from numpy.linalg import matrix_rank
 
 ROHC = tfp.distributions.RelaxedOneHotCategorical
 np.set_printoptions(precision=2, sign=' ')
@@ -14,12 +16,9 @@ np.set_printoptions(precision=2, sign=' ')
 def permutations(n):
     ma = [2**i for i in range(n)]
     arr = []
-    for i in range(n**2 - 1):
+    for i in range(2**n):
         arr.append([i//b % 2 for b in ma])
     return np.array(arr)
-
-from numpy.random import shuffle
-from numpy.linalg import matrix_rank
 
 def tt_split(arr, test_split=1.0):
     indexes = list(range(len(arr)))
@@ -142,11 +141,19 @@ class AgentPair:
                 lambda: tf.one_hot(tf.argmax(e_x, -1), e_x.shape[-1]),
                 lambda: Lambda(categorical)(e_x))
 
-        self.e_output = tf.layers.dropout(self.e_output,
-                noise_shape=(real_batch_size, cfg['sentence_len'], 1),
-                #noise_shape=(real_batch_size, 6, 1),
-                rate=droput_rate,
-                training=tf.logical_not(use_argmax),)
+        if True:
+            #self.e_output = Lambda(lambda x: tf.layers.dropout(self.e_output,
+            self.e_output = Lambda(lambda x: tf.layers.dropout(x,
+                    #noise_shape=(real_batch_size, cfg['sentence_len'], 1),
+                    noise_shape=(tf.shape(self.e_output)[0], cfg['sentence_len'], 1),
+                    rate=droput_rate,
+                    training=tf.logical_not(use_argmax),))(self.e_output)
+        else:
+            self.e_output = tf.layers.Dropout(
+                    noise_shape=(real_batch_size, cfg['sentence_len'], 1),
+                    #noise_shape=(real_batch_size, 6, 1),
+                    rate=droput_rate,
+                    training=tf.logical_not(use_argmax),)(self.e_output)
         
         # Decoder input
         d_x = Flatten(name='decoder_flatten')(self.e_output)
@@ -192,12 +199,13 @@ class AgentPair:
         #results = self.sess.run(self.d_sigmoid, feed_dict=self.train_fd)
         #test_input = self.train_fd['e_input:0'] 
         #print(self.sess.run(self.e_output, feed_dict=self.test_fd))
-        test_loss = self.sess.run(self.loss, feed_dict=self.test_fd)
+        all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
+        losses = np.apply_along_axis(np.average, -1, all_losses)
         print('\ntest_loss')
+        print(np.average(losses), np.max(losses))
         for i in range(len(test_input)):
             sent = ohvs_to_words(utt[i])
             #print(f'{test_input[i]} -> {sent} -> {results[i]}')
-            print(np.average(test_loss[i]))
         print()
         #score = sum([1 for i,r in enumerate(results) if i == np.argmax(r)])
         #print(f"{score}/{self.cfg['num_concepts']}")
@@ -212,8 +220,8 @@ default_config = {
     'e_dense_size': 30,
     'd_dense_size': 30,
     'input_dim': 8,
-    'num_concepts': 6,
-    'sentence_len': 6,
+    'num_concepts': 7,
+    'sentence_len': 7,
     'vocab_size': 2,
 
     'temp_init': 5,
