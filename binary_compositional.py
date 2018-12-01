@@ -73,12 +73,12 @@ class AgentPair:
     default_cfg = {
         # Actual batch_size == batch_size * num_concepts
         'batch_size': 7,
-        'epochs': 8000,
+        'epochs': 5000,
          # How often to anneal temperature
          # More like a traditional epoch due to small dataset size
         'superepoch': 200,
         'e_dense_size': 14,
-        'd_dense_size': 22,
+        'd_dense_size': 2,
         'input_dim': 8,
         'num_concepts': 7,
         'sentence_len': 7,
@@ -86,11 +86,12 @@ class AgentPair:
 
         'temp_init': 3,
         'temp_decay': 0.85,
-        'train_st': 0,
+        'train_st': 1,
         'test_prop': 0.1,
         'dropout_rate': 0.15,
         
         'verbose': False,
+        'print_all_sentences': False,
     }
     
 
@@ -159,11 +160,39 @@ class AgentPair:
                     training=tf.logical_not(use_argmax),)(self.e_output)
         
         # Decoder input
-        d_x = Flatten(name='decoder_flatten')(self.e_output)
-        d_x = Dense(self.cfg['d_dense_size'],
-                activation='relu',
-                name='decoder_input')(d_x)
-        #d_x1 = BatchNormalization()(d_x0)
+        weight_shape = (
+                #None,
+                self.cfg['sentence_len'],
+                self.cfg['vocab_size'],
+                self.cfg['d_dense_size'],
+                )
+        bias_shape = (
+                #None,
+                self.cfg['sentence_len'],
+                1, # Extra dim used below
+                self.cfg['d_dense_size'],
+                )
+        d_fc_w = tf.Variable(
+                tf.initializers.truncated_normal(
+                    1e-1, 1e-2)(tf.constant(weight_shape)),
+                dtype=tf.float32,
+                expected_shape=weight_shape,
+                )
+        d_fc_b = tf.Variable(
+                tf.constant(1e-1, shape=bias_shape),
+                dtype=tf.float32,
+                expected_shape=bias_shape,
+                )
+        batch_size = tf.shape(self.e_output)[0]
+        tiled = tf.reshape(
+                tf.tile(d_fc_w, (batch_size, 1, 1)),
+                (batch_size,) + weight_shape)
+        e_output_reshaped = tf.reshape(
+                self.e_output,
+                (-1, self.cfg['sentence_len'], 1, self.cfg['vocab_size']))
+        d_x = tf.matmul(e_output_reshaped, tiled) + d_fc_b
+        d_x = Flatten(name='decoder_flatten')(d_x)
+
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
 
         d_x = Dense(self.cfg['input_dim'], activation=None,
@@ -232,21 +261,22 @@ class AgentPair:
         for i in range(len(test_input)):
             sent = ohvs_to_words(utt[i])
             #print(f'{test_input[i]} -> {sent} -> {results[i]}')
-        if np.average(losses) < 0.1:
-            inputs = permutations(self.cfg['num_concepts'])
-            fd = {
-                'e_input:0': inputs,
-                #'e_input:0': [[0,0,0,0]]*10,
-                'e_temp:0': 1e-8, # Not used
-                'e_st:0': 1,
-                'dropout_rate:0': 0.,
-                'use_argmax:0': True,
-            }
-            for i in range(2**self.cfg['num_concepts']):
-                utt = self.sess.run(self.e_output, feed_dict=fd)
-                sent = ohvs_to_words(utt[i])
-                print(f'{inputs[i]} -> {sent} -> {results[i]}')
-                results = self.sess.run(self.d_sigmoid, feed_dict=fd)
+        if self.cfg['print_all_sentences']:
+            if np.average(losses) < 0.1:
+                inputs = permutations(self.cfg['num_concepts'])
+                fd = {
+                    'e_input:0': inputs,
+                    #'e_input:0': [[0,0,0,0]]*10,
+                    'e_temp:0': 1e-8, # Not used
+                    'e_st:0': 1,
+                    'dropout_rate:0': 0.,
+                    'use_argmax:0': True,
+                }
+                for i in range(2**self.cfg['num_concepts']):
+                    utt = self.sess.run(self.e_output, feed_dict=fd)
+                    sent = ohvs_to_words(utt[i])
+                    print(f'{inputs[i]} -> {sent} -> {results[i]}')
+                    results = self.sess.run(self.d_sigmoid, feed_dict=fd)
         return np.average(losses) 
         #score = sum([1 for i,r in enumerate(results) if i == np.argmax(r)])
         #print(f"{score}/{self.cfg['num_concepts']}")
@@ -270,10 +300,10 @@ if __name__ == '__main__':
     np.set_printoptions(formatter={'float': lambda x: "{0:0.2f}".format(x)})
     cfg = {
         'verbose': True,
-        'dropout_rate': 0.1,
+        'dropout_rate': 0.15,
     }
     results = []
-    for i in range(2):
+    for i in range(3):
         print(f'{i}: ', end='')
         ap = AgentPair(cfg)
         results.append(ap.interactive_run())
