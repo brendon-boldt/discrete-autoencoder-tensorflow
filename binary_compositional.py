@@ -190,7 +190,7 @@ class AgentPair:
         e_output_reshaped = tf.reshape(
                 self.e_output,
                 (-1, self.cfg['sentence_len'], 1, self.cfg['vocab_size']))
-        d_x = tf.matmul(e_output_reshaped, tiled) + d_fc_b
+        d_x = tf.nn.relu(tf.matmul(e_output_reshaped, tiled) + d_fc_b)
         d_x = Flatten(name='decoder_flatten')(d_x)
 
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
