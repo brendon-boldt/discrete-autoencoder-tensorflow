@@ -86,7 +86,7 @@ class AgentPair:
 
         'temp_init': 3,
         'temp_decay': 0.85,
-        'train_st': 1,
+        'train_st': 0,
         'test_prop': 0.1,
         'dropout_rate': 0.15,
         
@@ -116,13 +116,13 @@ class AgentPair:
         e_st = tf.placeholder(tf.bool, shape=(), name='e_st')
 
         # Generate a static vector space of "concepts"
-        #e_x = Dense(self.cfg['input_dim'],
-        e_x = Dense(self.cfg['num_concepts'],
-                trainable=False,
-                kernel_initializer=RandomNormal(0., 2.),
-                #kernel_initializer=identityInitializer,
-                use_bias=False,
-                name='concept_space',)(e_inputs)
+        e_embeddings_w = tf.Variable(
+                tf.initializers.truncated_normal(0, 1e0)(
+                    (self.cfg['num_concepts'], self.cfg['input_dim'])),
+                dtype=tf.float32,
+                )
+                
+        e_x = tf.matmul(e_inputs, e_embeddings_w)
 
         # Dense layer for encocder
         e_x = Dense(self.cfg['e_dense_size'],
@@ -174,7 +174,7 @@ class AgentPair:
                 )
         d_fc_w = tf.Variable(
                 tf.initializers.truncated_normal(
-                    1e-1, 1e-2)(tf.constant(weight_shape)),
+                    0., 1e-2)(tf.constant(weight_shape)),
                 dtype=tf.float32,
                 expected_shape=weight_shape,
                 )
