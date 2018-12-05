@@ -86,9 +86,9 @@ class AgentPair:
 
         'temp_init': 3,
         'temp_decay': 0.85,
-        'train_st': 0,
+        'train_st': False,
         'test_prop': 0.1,
-        'dropout_rate': 0.15,
+        'dropout_rate': 0.2,
         
         'verbose': False,
         'print_all_sentences': False,
@@ -101,6 +101,9 @@ class AgentPair:
         else:
             self.cfg = {**AgentPair.default_cfg, **cfg} 
         self.sess = tf.Session()
+        self.initialize_graph()
+
+    def initialize_graph(self):
 
         self.generate_data()
         real_batch_size = self.train_fd['e_input:0'].shape[0]
@@ -129,11 +132,8 @@ class AgentPair:
                 activation='relu',
                 name='encoder_h0')(e_x)
         #e_x = tf.layers.batch_normalization(e_x, renorm=True)
-        # The generic keras BN was NaN'ing, but tf.keras might be okay
-        #e_x = BatchNormalization()(e_x)
         e_x = Dense(self.cfg['vocab_size']*self.cfg['sentence_len'],
                 name="encoder_word_dense")(e_x)
-
 
         e_x = tf.keras.layers.Reshape((self.cfg['sentence_len'],
                 self.cfg['vocab_size']))(e_x)
@@ -145,29 +145,18 @@ class AgentPair:
                 lambda: tf.one_hot(tf.argmax(e_x, -1), e_x.shape[-1]),
                 lambda: Lambda(categorical)(e_x))
 
-        if True:
-            #self.e_output = Lambda(lambda x: tf.layers.dropout(self.e_output,
-            self.e_output = Lambda(lambda x: tf.layers.dropout(x,
-                    #noise_shape=(real_batch_size, self.cfg['sentence_len'], 1),
-                    noise_shape=(tf.shape(self.e_output)[0], self.cfg['sentence_len'], 1),
-                    rate=dropout_rate,
-                    training=tf.logical_not(use_argmax),))(self.e_output)
-        else:
-            self.e_output = tf.layers.Dropout(
-                    noise_shape=(real_batch_size, self.cfg['sentence_len'], 1),
-                    #noise_shape=(real_batch_size, 6, 1),
-                    rate=dropout_rate,
-                    training=tf.logical_not(use_argmax),)(self.e_output)
+        self.e_output = Lambda(lambda x: tf.layers.dropout(x,
+                noise_shape=(tf.shape(self.e_output)[0], self.cfg['sentence_len'], 1),
+                rate=dropout_rate,
+                training=tf.logical_not(use_argmax),))(self.e_output)
         
         # Decoder input
         weight_shape = (
-                #None,
                 self.cfg['sentence_len'],
                 self.cfg['vocab_size'],
                 self.cfg['d_dense_size'],
                 )
         bias_shape = (
-                #None,
                 self.cfg['sentence_len'],
                 1, # Extra dim used below
                 self.cfg['d_dense_size'],
@@ -200,13 +189,10 @@ class AgentPair:
         d_output = Dense(self.cfg['num_concepts'],
                 name="decoder_class",
                 activation=None,)(d_x)
-        #self.d_softmax = tf.nn.softmax(d_output)
         self.d_sigmoid = tf.nn.sigmoid(d_output)
 
         e_inputs = tf.stop_gradient(e_inputs)
         optmizier = tf.train.AdamOptimizer()
-        #self.loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                #logits=d_output, labels=tf.argmax(e_inputs, axis=-1))
         self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
                 logits=d_output, labels=e_inputs)
 
@@ -231,9 +217,8 @@ class AgentPair:
 
         self.test_fd = {
             'e_input:0': test_input,
-            #'e_input:0': [[0,0,0,0]]*10,
             'e_temp:0': 1e-8, # Not used
-            'e_st:0': 1,
+            'e_st:0': True,
             'dropout_rate:0': 0.,
             'use_argmax:0': True,
         }
@@ -248,38 +233,31 @@ class AgentPair:
                     loss = self.sess.run(self.loss, feed_dict=self.train_fd)
                     print(loss.mean())
 
-        results = self.sess.run(self.d_sigmoid, feed_dict=self.test_fd)
-        utt = self.sess.run(self.e_output, feed_dict=self.test_fd)
         test_input = self.test_fd['e_input:0'] 
-        #results = self.sess.run(self.d_sigmoid, feed_dict=self.train_fd)
-        #test_input = self.train_fd['e_input:0'] 
-        #print(self.sess.run(self.e_output, feed_dict=self.test_fd))
         all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
         losses = np.apply_along_axis(np.average, -1, all_losses)
-        print('\ntest_loss')
-        print(np.average(losses), np.max(losses))
-        for i in range(len(test_input)):
-            sent = ohvs_to_words(utt[i])
-            #print(f'{test_input[i]} -> {sent} -> {results[i]}')
+        if self.cfg['verbose']:
+            print('test_loss')
+            print(np.average(losses), np.max(losses))
+            print()
+
         if self.cfg['print_all_sentences']:
-            if np.average(losses) < 0.1:
+            if np.average(losses) < 0.01:
                 inputs = permutations(self.cfg['num_concepts'])
                 fd = {
                     'e_input:0': inputs,
-                    #'e_input:0': [[0,0,0,0]]*10,
+                    'e_input:0': [[0,0,0,0]]*10,
                     'e_temp:0': 1e-8, # Not used
                     'e_st:0': 1,
                     'dropout_rate:0': 0.,
                     'use_argmax:0': True,
                 }
+                results = self.sess.run(self.d_sigmoid, feed_dict=fd)
                 for i in range(2**self.cfg['num_concepts']):
                     utt = self.sess.run(self.e_output, feed_dict=fd)
                     sent = ohvs_to_words(utt[i])
                     print(f'{inputs[i]} -> {sent} -> {results[i]}')
-                    results = self.sess.run(self.d_sigmoid, feed_dict=fd)
         return np.average(losses) 
-        #score = sum([1 for i,r in enumerate(results) if i == np.argmax(r)])
-        #print(f"{score}/{self.cfg['num_concepts']}")
 
     def get_performance(self):
         self.sess.run(tf.initializers.global_variables())
@@ -299,13 +277,21 @@ class AgentPair:
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': lambda x: "{0:0.2f}".format(x)})
     cfg = {
+        'epochs': 1000,
         'verbose': True,
-        'dropout_rate': 0.15,
+        'dropout_rate': 0.2,
+        'print_all_sentences': False,
     }
     results = []
-    for i in range(3):
-        print(f'{i}: ', end='')
-        ap = AgentPair(cfg)
-        results.append(ap.interactive_run())
-        tf.reset_default_graph()
+    #for i in range(3):
+    try:
+        while True:
+            ap = AgentPair(cfg)
+            writer = tf.summary.FileWriter('log', ap.sess.graph)
+            results.append(ap.interactive_run())
+            writer.close()
+            exit(0)
+            tf.reset_default_graph()
+    except KeyboardInterrupt:
+        pass
 
