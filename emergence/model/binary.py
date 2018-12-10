@@ -5,70 +5,49 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (Dense, Dropout, Input, Concatenate,
         BatchNormalization, RepeatVector, Lambda, Flatten)
 from tensorflow.keras.initializers import RandomNormal
-import tensorflow_probability as tfp
+from tensorflow_probability.python.distributions import RelaxedOneHotCategorical
 from numpy.random import shuffle
 from numpy.linalg import matrix_rank
 
-ROHC = tfp.distributions.RelaxedOneHotCategorical
-np.set_printoptions(precision=2, sign=' ')
-#np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
+class Binary:
+    """A model describing communicating an arbitrary vecotr which is first
+    transformed into a random embedding."""
 
-def permutations(n):
-    ma = [2**i for i in range(n)]
-    arr = []
-    for i in range(2**n):
-        arr.append([i//b % 2 for b in ma])
-    return np.array(arr)
-
-def tt_split(arr, test_split=1.0):
-    indexes = list(range(len(arr)))
-    shuffle(indexes)
-    train, test = [], []
-    n = arr.shape[1]
-    covered = []
-    for i in indexes:
-        mr_covered = matrix_rank(covered)
-        if sum(arr[i]) == 0.:
-            test.append(i)
-            train.append(i)
-        if mr_covered == n:
-            if len(test)/len(arr) < test_split:
-                test.append(i)
+    @staticmethod
+    def train_test_split(arr, test_split=1.0):
+        """Roughly split the data ensuring that the train set has a span of the
+        whole space."""
+        indexes = list(range(len(arr)))
+        shuffle(indexes)
+        train, test = [], []
+        n = arr.shape[1]
+        covered = []
+        for i in indexes:
+            mr_covered = matrix_rank(covered)
+            if sum(arr[i]) == 0.:
+                continue
+                # The zero vector is a degenerate case, and I do not believe it
+                # is worth including
+                #test.append(i)
+                #train.append(i)
+            if mr_covered == n:
+                if len(test)/len(arr) < test_split:
+                    test.append(i)
+                else:
+                    train.append(i)
             else:
+                covered.append(arr[i])
                 train.append(i)
-        else:
-            covered.append(arr[i])
-            train.append(i)
-            #if matrix_rank(covered + [arr[i]]) > mr_covered:
-            #    covered.append(arr[i])
-            #    train.append(i)
-            #else:
-            #    test.append(i)
 
-    return train, test 
+        return train, test 
 
-def ohvs_to_words(ohvs):
-    sentence = ""
-    for v in ohvs:
-        sentence += chr(ord('a')+np.argmax(v))
-    return sentence
-
-
-def sampler(logits, temp, size, straight_through):
-    """Sampling function for Gumbel-Softmax"""
-    dist = ROHC(temperature=temp, logits=logits)
-    sample = dist.sample()
-    y_hard = tf.one_hot(tf.argmax(sample, -1), size)
-    # y_hard is the value that gets used but the gradient flows through logits
-    y = tf.stop_gradient(y_hard - logits) + logits
-
-    return tf.cond(straight_through, lambda: y, lambda: sample)
-
-def identityInitializer(shape, **kwargs):
-    return np.identity(shape[0])
-
-class AgentPair:
-
+    @staticmethod
+    def permutations(n):
+        ma = [2**i for i in range(n)]
+        arr = []
+        for i in range(2**n):
+            arr.append([i//b % 2 for b in ma])
+        return np.array(arr)
 
     default_cfg = {
         # Actual batch_size == batch_size * num_concepts
@@ -89,43 +68,41 @@ class AgentPair:
         'train_st': False,
         'test_prop': 0.1,
         'dropout_rate': 0.2,
-        
-        'verbose': False,
-        'print_all_sentences': False,
     }
-    
 
     def __init__(self, cfg=None):
         if cfg is None:
-            self.cfg = AgentPair.default_cfg
+            self.cfg = Binary.default_cfg
         else:
-            self.cfg = {**AgentPair.default_cfg, **cfg} 
+            self.cfg = {**Binary.default_cfg, **cfg} 
         self.sess = tf.Session()
         self.initialize_graph()
 
-    def initialize_graph(self):
+    # This probably should not be a staticmethod
+    def gs_sampler(self, logits):
+        """Sampling function for Gumbel-Softmax"""
+        dist = RelaxedOneHotCategorical(temperature=self.temperature, logits=logits)
+        sample = dist.sample()
+        y_hard = tf.one_hot(tf.argmax(sample, -1), self.cfg['vocab_size'])
+        # y_hard is the value that gets used but the gradient flows through logits
+        y = tf.stop_gradient(y_hard - logits) + logits
 
-        self.generate_data()
-        real_batch_size = self.train_fd['e_input:0'].shape[0]
+        return tf.cond(self.straight_through, lambda: y, lambda: sample)
 
-        dropout_rate = tf.placeholder(tf.float32, shape=(),
-                name='dropout_rate')
-        use_argmax = tf.placeholder(tf.bool, shape=(),
-                name='use_argmax')
 
-        # Encoder inputs
-        e_inputs = Input(shape=(self.cfg['num_concepts'],), name='e_input')
-        e_temp = tf.placeholder(tf.float32, shape=(), name='e_temp')
-        e_st = tf.placeholder(tf.bool, shape=(), name='e_st')
+    def initialize_encoder(self):
+        unstopped_inputs = Input(shape=(self.cfg['num_concepts'],), name='e_input')
+        self.e_inputs = tf.stop_gradient(unstopped_inputs)
 
         # Generate a static vector space of "concepts"
         e_embeddings_w = tf.Variable(
                 tf.initializers.truncated_normal(0, 1e0)(
                     (self.cfg['num_concepts'], self.cfg['input_dim'])),
                 dtype=tf.float32,
+                trainable=False,
                 )
-                
-        e_x = tf.matmul(e_inputs, e_embeddings_w)
+            
+        e_x = tf.matmul(self.e_inputs, e_embeddings_w)
 
         # Dense layer for encocder
         e_x = Dense(self.cfg['e_dense_size'],
@@ -135,22 +112,35 @@ class AgentPair:
         e_x = Dense(self.cfg['vocab_size']*self.cfg['sentence_len'],
                 name="encoder_word_dense")(e_x)
 
-        e_x = tf.keras.layers.Reshape((self.cfg['sentence_len'],
+        self.e_raw_output = tf.keras.layers.Reshape((self.cfg['sentence_len'],
                 self.cfg['vocab_size']))(e_x)
 
-        # Generate GS sampling layer
-        categorical = lambda x: (
-            sampler(x, e_temp, self.cfg['vocab_size'], e_st))
-        self.e_output = tf.cond(use_argmax,
-                lambda: tf.one_hot(tf.argmax(e_x, -1), e_x.shape[-1]),
-                lambda: Lambda(categorical)(e_x))
+    def initialize_communication(self):
+        categorical_output = self.gs_sampler
 
-        self.e_output = Lambda(lambda x: tf.layers.dropout(x,
-                noise_shape=(tf.shape(self.e_output)[0], self.cfg['sentence_len'], 1),
-                rate=dropout_rate,
-                training=tf.logical_not(use_argmax),))(self.e_output)
-        
-        # Decoder input
+        argmax_selector = lambda: tf.one_hot(
+                tf.argmax(self.e_raw_output, -1),
+                self.e_raw_output.shape[-1]
+                )
+        gumbel_softmax_selector = lambda: Lambda(categorical_output)(self.e_raw_output)
+        self.utterance = tf.cond(self.use_argmax,
+                argmax_selector,
+                gumbel_softmax_selector,
+                name="argmax_cond",
+                )
+
+        dropout_lambda = Lambda(
+                lambda x: tf.layers.dropout(
+                    x,
+                    noise_shape=(tf.shape(self.utterance)[0], self.cfg['sentence_len'], 1),
+                    rate=self.dropout_rate,
+                    training=tf.logical_not(self.use_argmax),
+                    ),
+                name="dropout_lambda",
+                )
+        self.utt_dropout = dropout_lambda(self.utterance)
+
+    def initialize_decoder(self):
         weight_shape = (
                 self.cfg['sentence_len'],
                 self.cfg['vocab_size'],
@@ -172,99 +162,132 @@ class AgentPair:
                 dtype=tf.float32,
                 expected_shape=bias_shape,
                 )
-        batch_size = tf.shape(self.e_output)[0]
+
+        batch_size = tf.shape(self.utt_dropout)[0]
+
         tiled = tf.reshape(
                 tf.tile(d_fc_w, (batch_size, 1, 1)),
                 (batch_size,) + weight_shape)
-        e_output_reshaped = tf.reshape(
-                self.e_output,
+        utt_dropout_reshaped = tf.reshape(
+                self.utt_dropout,
                 (-1, self.cfg['sentence_len'], 1, self.cfg['vocab_size']))
-        d_x = tf.nn.relu(tf.matmul(e_output_reshaped, tiled) + d_fc_b)
+
+        d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b)
         d_x = Flatten(name='decoder_flatten')(d_x)
 
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
 
         d_x = Dense(self.cfg['input_dim'], activation=None,
                 name='decoder_output')(d_x)
-        d_output = Dense(self.cfg['num_concepts'],
+        self.d_output = Dense(self.cfg['num_concepts'],
                 name="decoder_class",
                 activation=None,)(d_x)
-        self.d_sigmoid = tf.nn.sigmoid(d_output)
+        self.d_sigmoid = tf.nn.sigmoid(self.d_output)
 
-        e_inputs = tf.stop_gradient(e_inputs)
-        optmizier = tf.train.AdamOptimizer()
-        self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                logits=d_output, labels=e_inputs)
+    def initialize_graph(self):
+        with tf.name_scope("hyperparameters"):
+            self.dropout_rate = tf.placeholder(tf.float32, shape=(),
+                    name='dropout_rate')
+            self.use_argmax = tf.placeholder(tf.bool, shape=(),
+                    name='use_argmax')
+            self.temperature = tf.placeholder(tf.float32, shape=(),
+                    name='temperature')
+            self.straight_through = tf.placeholder(tf.bool, shape=(),
+                    name='straight_through')
 
-        self.train = optmizier.minimize(self.loss)
+        with tf.name_scope("environment"):
+            with tf.name_scope("encoder"):
+                self.initialize_encoder()
+            with tf.name_scope("communication"):
+                self.initialize_communication()
+            with tf.name_scope("decoder"):
+                self.initialize_decoder()
 
-    def generate_data(self):
-        all_input = permutations(self.cfg['num_concepts'])
-        train_i, test_i = tt_split(all_input, self.cfg['test_prop'])
+        with tf.name_scope("training"):
+            optmizier = tf.train.AdamOptimizer()
+            self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                    logits=self.d_output, labels=self.e_inputs)
+
+            self.train_step = optmizier.minimize(self.loss)
+
+    def generate_train_and_test(self):
+        all_input = Binary.permutations(self.cfg['num_concepts'])
+        shuffle(all_input)
+        train_i, test_i = Binary.train_test_split(
+                all_input,
+                self.cfg['test_prop']
+                )
         train_i = np.repeat(train_i, self.cfg['batch_size'], axis=0)
         shuffle(train_i)
 
-        train_input = all_input[train_i]
-        test_input = all_input[test_i]
+        # Inputs and labels are the same, so duplciate them
+        train_data = (all_input[train_i],) * 2
+        test_data = (all_input[test_i],) * 2
+        return train_data, test_data
 
-        self.train_fd = {
-            'e_input:0': train_input,
-            'e_temp:0': self.cfg['temp_init'],
-            'e_st:0': self.cfg['train_st'],
-            'dropout_rate:0': self.cfg['dropout_rate'],
-            'use_argmax:0': False,
+    def train(self, inputs, labels=None, verbose=False):
+        # The labels are unused because they are the same as the input
+        train_fd = {
+            self.e_inputs.name: inputs,
+            self.temperature.name: self.cfg['temp_init'],
+            self.straight_through.name: self.cfg['train_st'],
+            self.dropout_rate.name: self.cfg['dropout_rate'],
+            self.use_argmax.name: False,
         }
 
-        self.test_fd = {
-            'e_input:0': test_input,
-            'e_temp:0': 1e-8, # Not used
-            'e_st:0': True,
-            'dropout_rate:0': 0.,
-            'use_argmax:0': True,
-        }
-
-    def interactive_run(self):
+        # This might belong elsewhere
         self.sess.run(tf.initializers.global_variables())
+
         for i in range(self.cfg['epochs']):
-            self.sess.run(self.train, feed_dict=self.train_fd)
+            self.sess.run(self.train_step, feed_dict=train_fd)
             if i % self.cfg['superepoch'] == 0:
-                self.train_fd['e_temp:0'] *= self.cfg['temp_decay']
-                if self.cfg['verbose']:
-                    loss = self.sess.run(self.loss, feed_dict=self.train_fd)
-                    print(loss.mean())
+                train_fd[self.temperature.name] *= self.cfg['temp_decay']
+                if verbose:
+                    loss = self.sess.run(self.loss, feed_dict=train_fd)
+                    print(f"superepoch {i // self.cfg['superepoch']}\t"
+                          f"training loss: {loss.mean():.3f}")
 
-        test_input = self.test_fd['e_input:0'] 
-        all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
+    def test(self, inputs, labels, verbose=False):
+        # The labels are unused because they are the same as the input
+        test_fd = {
+            self.e_inputs.name: inputs,
+            self.temperature.name: self.cfg['temp_init'], # Unused
+            self.straight_through.name: True, # Unused
+            self.dropout_rate.name: 0., # Unused
+            self.use_argmax.name: True,
+        }
+
+        all_losses = self.sess.run(self.loss, feed_dict=test_fd)
         losses = np.apply_along_axis(np.average, -1, all_losses)
-        if self.cfg['verbose']:
-            print('test_loss')
-            print(np.average(losses), np.max(losses))
-            print()
+        if verbose:
+            print(f"test loss\t"
+                  f"avg: {np.average(losses):.3f}\t"
+                  f"max: {np.max(losses):.3f}")
 
-        if self.cfg['print_all_sentences']:
-            if np.average(losses) < 0.01:
-                inputs = permutations(self.cfg['num_concepts'])
-                fd = {
-                    'e_input:0': inputs,
-                    'e_input:0': [[0,0,0,0]]*10,
-                    'e_temp:0': 1e-8, # Not used
-                    'e_st:0': 1,
-                    'dropout_rate:0': 0.,
-                    'use_argmax:0': True,
-                }
-                results = self.sess.run(self.d_sigmoid, feed_dict=fd)
-                for i in range(2**self.cfg['num_concepts']):
-                    utt = self.sess.run(self.e_output, feed_dict=fd)
-                    sent = ohvs_to_words(utt[i])
-                    print(f'{inputs[i]} -> {sent} -> {results[i]}')
-        return np.average(losses) 
+    def output_test_space(self, verbose=False):
+        # Not yet implemented
+        inputs = Binary.permutations(self.cfg['num_concepts'])
+        fd = {
+            self.e_inputs.name: inputs,
+            self.temperature.name: self.cfg['temp_init'], # Unused
+            self.straight_through.name: True, # Unused
+            self.dropout_rate.name: 0., # Unused
+            self.use_argmax.name: True,
+        }
+        results = self.sess.run(self.d_sigmoid, feed_dict=fd)
+        utterances = self.sess.run(self.utterance, feed_dict=fd)
+        for i in range(2**self.cfg['num_concepts']):
+            pass
+            #sent = Binary.ohvs_to_words(utterance[i])
+            #print(f'{inputs[i]} -> {sent} -> {results[i]}')
 
     def get_performance(self):
+        """Train and test the model for use in hyperparameter tuning"""
         self.sess.run(tf.initializers.global_variables())
         for i in range(self.cfg['epochs']):
-            self.sess.run(self.train, feed_dict=self.train_fd)
+            self.sess.run(self.train_step, feed_dict=self.train_fd)
             if i % self.cfg['superepoch'] == 0:
-                self.train_fd['e_temp:0'] *= self.cfg['temp_decay']
+                self.train_fd['temperature:0'] *= self.cfg['temp_decay']
 
         all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
         losses = np.apply_along_axis(np.average, -1, all_losses)
@@ -286,7 +309,7 @@ if __name__ == '__main__':
     #for i in range(3):
     try:
         while True:
-            ap = AgentPair(cfg)
+            ap = Binary(cfg)
             writer = tf.summary.FileWriter('log', ap.sess.graph)
             results.append(ap.interactive_run())
             writer.close()

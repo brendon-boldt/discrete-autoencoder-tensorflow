@@ -24,7 +24,7 @@ def sampler(logits, temp, size, straight_through):
     pred = tf.reshape(tf.slice(straight_through, [0,0], [1,1]), ())
     return tf.where(pred, y, sample)
 
-class AgentPair:
+class OneHot:
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -134,6 +134,6 @@ if __name__ == '__main__':
     np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
     cfg = default_config
     for _ in range(3):
-        ap = AgentPair(cfg)
+        ap = OneHot(cfg)
         ap.run()
         tf.reset_default_graph()
