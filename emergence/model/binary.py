@@ -70,15 +70,15 @@ class Binary:
         'dropout_rate': 0.2,
     }
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, logdir='log'):
         if cfg is None:
             self.cfg = Binary.default_cfg
         else:
             self.cfg = {**Binary.default_cfg, **cfg} 
         self.sess = tf.Session()
         self.initialize_graph()
+        self.file_writer = tf.summary.FileWriter(logdir, self.sess.graph)
 
-    # This probably should not be a staticmethod
     def gs_sampler(self, logits):
         """Sampling function for Gumbel-Softmax"""
         dist = RelaxedOneHotCategorical(temperature=self.temperature, logits=logits)
@@ -88,7 +88,6 @@ class Binary:
         y = tf.stop_gradient(y_hard - logits) + logits
 
         return tf.cond(self.straight_through, lambda: y, lambda: sample)
-
 
     def initialize_encoder(self):
         unstopped_inputs = Input(shape=(self.cfg['num_concepts'],), name='e_input')
@@ -207,8 +206,14 @@ class Binary:
             optmizier = tf.train.AdamOptimizer()
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     logits=self.d_output, labels=self.e_inputs)
+            tf.summary.scalar('loss', tf.reduce_mean(self.loss))
 
             self.train_step = optmizier.minimize(self.loss)
+
+        self.init_op = tf.initializers.global_variables()
+        self.sess.run(self.init_op)
+        self.summary = tf.summary.merge_all()
+
 
     def generate_train_and_test(self):
         all_input = Binary.permutations(self.cfg['num_concepts'])
@@ -235,14 +240,17 @@ class Binary:
             self.use_argmax.name: False,
         }
 
-        # This might belong elsewhere
-        self.sess.run(tf.initializers.global_variables())
-
         for i in range(self.cfg['epochs']):
             self.sess.run(self.train_step, feed_dict=train_fd)
             if i % self.cfg['superepoch'] == 0:
                 train_fd[self.temperature.name] *= self.cfg['temp_decay']
                 if verbose:
+                    summary = self.sess.run(self.summary, feed_dict=train_fd)
+                    self.file_writer.add_summary(
+                            summary,
+                            i // self.cfg['superepoch']
+                            )
+                    # TODO Fix this redundancy
                     loss = self.sess.run(self.loss, feed_dict=train_fd)
                     print(f"superepoch {i // self.cfg['superepoch']}\t"
                           f"training loss: {loss.mean():.3f}")
