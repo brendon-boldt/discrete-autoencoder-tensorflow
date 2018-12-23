@@ -9,6 +9,8 @@ from tensorflow_probability.python.distributions import RelaxedOneHotCategorical
 from numpy.random import shuffle
 from numpy.linalg import matrix_rank
 
+from .. import util
+
 class Binary:
     """A model describing communicating an arbitrary vecotr which is first
     transformed into a random embedding."""
@@ -63,6 +65,7 @@ class Binary:
         'sentence_len': 7,
         'vocab_size': 2,
 
+        'learning_rate': 1e-2,
         'temp_init': 3,
         'temp_decay': 0.85,
         'train_st': False,
@@ -77,7 +80,15 @@ class Binary:
             self.cfg = {**Binary.default_cfg, **cfg} 
         self.sess = tf.Session()
         self.initialize_graph()
-        self.file_writer = tf.summary.FileWriter(logdir, self.sess.graph)
+        self.generate_train_and_test()
+        self.train_writer = tf.summary.FileWriter(
+                logdir + '/train',
+                self.sess.graph
+                )
+        self.test_writer = tf.summary.FileWriter(
+                logdir + '/test',
+                self.sess.graph
+                )
 
     def gs_sampler(self, logits):
         """Sampling function for Gumbel-Softmax"""
@@ -141,7 +152,7 @@ class Binary:
 
     def initialize_decoder(self):
         weight_shape = (
-                self.cfg['sentence_len'],
+                1,
                 self.cfg['vocab_size'],
                 self.cfg['d_dense_size'],
                 )
@@ -165,8 +176,9 @@ class Binary:
         batch_size = tf.shape(self.utt_dropout)[0]
 
         tiled = tf.reshape(
-                tf.tile(d_fc_w, (batch_size, 1, 1)),
-                (batch_size,) + weight_shape)
+                tf.tile(d_fc_w, (batch_size, self.cfg['sentence_len'], 1)),
+                (batch_size,) + (self.cfg['sentence_len'],) + weight_shape[1:],
+                )
         utt_dropout_reshaped = tf.reshape(
                 self.utt_dropout,
                 (-1, self.cfg['sentence_len'], 1, self.cfg['vocab_size']))
@@ -203,7 +215,7 @@ class Binary:
                 self.initialize_decoder()
 
         with tf.name_scope("training"):
-            optmizier = tf.train.AdamOptimizer()
+            optmizier = tf.train.AdamOptimizer(self.cfg['learning_rate'])
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     logits=self.d_output, labels=self.e_inputs)
             tf.summary.scalar('loss', tf.reduce_mean(self.loss))
@@ -213,7 +225,6 @@ class Binary:
         self.init_op = tf.initializers.global_variables()
         self.sess.run(self.init_op)
         self.summary = tf.summary.merge_all()
-
 
     def generate_train_and_test(self):
         all_input = Binary.permutations(self.cfg['num_concepts'])
@@ -226,9 +237,53 @@ class Binary:
         shuffle(train_i)
 
         # Inputs and labels are the same, so duplciate them
-        train_data = (all_input[train_i],) * 2
-        test_data = (all_input[test_i],) * 2
-        return train_data, test_data
+        train_data = all_input[train_i]
+        test_data = all_input[test_i]
+
+        self.train_fd = {
+            self.e_inputs.name: train_data,
+            self.temperature.name: self.cfg['temp_init'],
+            self.straight_through.name: self.cfg['train_st'],
+            self.dropout_rate.name: self.cfg['dropout_rate'],
+            self.use_argmax.name: False,
+        }
+        self.test_fd = {
+            self.e_inputs.name: test_data,
+            self.temperature.name: self.cfg['temp_init'], # Unused
+            self.straight_through.name: True, # Unused
+            self.dropout_rate.name: 0., # Unused
+            self.use_argmax.name: True,
+        }
+        #return train_data, test_data
+
+    def run(self, verbose=False):
+        # The labels are unused because they are the same as the input
+        for i in range(self.cfg['epochs']):
+            self.sess.run(self.train_step, feed_dict=self.train_fd)
+            if i % self.cfg['superepoch'] == 0:
+                self.train_fd[self.temperature.name] *= self.cfg['temp_decay']
+
+                train_fd_use_argmax = {
+                        **self.train_fd,
+                        self.use_argmax.name: True
+                        }
+                superepoch = i // self.cfg['superepoch']
+                summary = self.sess.run(
+                        self.summary,
+                        feed_dict=train_fd_use_argmax
+                        )
+                self.train_writer.add_summary(summary, superepoch)
+                summary = self.sess.run(self.summary, feed_dict=self.test_fd)
+                self.test_writer.add_summary(summary, superepoch)
+
+                if verbose:
+                    # TODO Fix this redundancy
+                    loss = self.sess.run(
+                            self.loss,
+                            feed_dict=train_fd_use_argmax
+                            )
+                    print(f"superepoch {i // self.cfg['superepoch']}\t"
+                          f"training loss: {loss.mean():.3f}")
 
     def train(self, inputs, labels=None, verbose=False):
         # The labels are unused because they are the same as the input
@@ -255,17 +310,9 @@ class Binary:
                     print(f"superepoch {i // self.cfg['superepoch']}\t"
                           f"training loss: {loss.mean():.3f}")
 
-    def test(self, inputs, labels, verbose=False):
+    def test(self, verbose=False):
         # The labels are unused because they are the same as the input
-        test_fd = {
-            self.e_inputs.name: inputs,
-            self.temperature.name: self.cfg['temp_init'], # Unused
-            self.straight_through.name: True, # Unused
-            self.dropout_rate.name: 0., # Unused
-            self.use_argmax.name: True,
-        }
-
-        all_losses = self.sess.run(self.loss, feed_dict=test_fd)
+        all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
         losses = np.apply_along_axis(np.average, -1, all_losses)
         if verbose:
             print(f"test loss\t"
@@ -275,35 +322,12 @@ class Binary:
     def output_test_space(self, verbose=False):
         # Not yet implemented
         inputs = Binary.permutations(self.cfg['num_concepts'])
-        fd = {
-            self.e_inputs.name: inputs,
-            self.temperature.name: self.cfg['temp_init'], # Unused
-            self.straight_through.name: True, # Unused
-            self.dropout_rate.name: 0., # Unused
-            self.use_argmax.name: True,
-        }
+        fd = {**self.train_fd, self.e_inputs.name: inputs}
         results = self.sess.run(self.d_sigmoid, feed_dict=fd)
         utterances = self.sess.run(self.utterance, feed_dict=fd)
         for i in range(2**self.cfg['num_concepts']):
-            pass
-            #sent = Binary.ohvs_to_words(utterance[i])
-            #print(f'{inputs[i]} -> {sent} -> {results[i]}')
-
-    def get_performance(self):
-        """Train and test the model for use in hyperparameter tuning"""
-        self.sess.run(tf.initializers.global_variables())
-        for i in range(self.cfg['epochs']):
-            self.sess.run(self.train_step, feed_dict=self.train_fd)
-            if i % self.cfg['superepoch'] == 0:
-                self.train_fd['temperature:0'] *= self.cfg['temp_decay']
-
-        all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
-        losses = np.apply_along_axis(np.average, -1, all_losses)
-        #print(np.average(losses), np.max(losses))
-        return {
-            'average': np.average(losses),
-            'max': np.max(losses),
-        }
+            sent = util.ohvs_to_words(utterances[i])
+            print(f'{inputs[i]} -> {sent} -> {results[i]}')
 
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float': lambda x: "{0:0.2f}".format(x)})
