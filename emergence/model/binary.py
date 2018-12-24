@@ -256,6 +256,12 @@ class Binary:
         }
         #return train_data, test_data
 
+    def set_train_data(self, inputs):
+        self.train_fd[self.e_inputs.name] = inputs
+
+    def set_test_data(self, inputs):
+        self.test_fd[self.e_inputs.name] = inputs
+
     def run(self, verbose=False):
         # The labels are unused because they are the same as the input
         for i in range(self.cfg['epochs']):
@@ -287,6 +293,7 @@ class Binary:
 
     def train(self, inputs, labels=None, verbose=False):
         # The labels are unused because they are the same as the input
+        #fd = self.train_fd
         train_fd = {
             self.e_inputs.name: inputs,
             self.temperature.name: self.cfg['temp_init'],
@@ -318,14 +325,17 @@ class Binary:
             print(f"test loss\t"
                   f"avg: {np.average(losses):.3f}\t"
                   f"max: {np.max(losses):.3f}")
+        return np.average(losses)
 
     def output_test_space(self, verbose=False):
-        # Not yet implemented
-        inputs = Binary.permutations(self.cfg['num_concepts'])
-        fd = {**self.train_fd, self.e_inputs.name: inputs}
+        #inputs = Binary.permutations(self.cfg['num_concepts'])
+        inputs = sorted(self.train_fd[self.e_inputs.name]
+                + self.test_fd[self.e_inputs.name])
+        fd = {**self.test_fd, self.e_inputs.name: inputs}
         results = self.sess.run(self.d_sigmoid, feed_dict=fd)
         utterances = self.sess.run(self.utterance, feed_dict=fd)
-        for i in range(2**self.cfg['num_concepts']):
+        #for i in range(2**self.cfg['num_concepts']):
+        for i in range(len(fd[self.e_inputs.name])):
             sent = util.ohvs_to_words(utterances[i])
             print(f'{inputs[i]} -> {sent} -> {results[i]}')
 
