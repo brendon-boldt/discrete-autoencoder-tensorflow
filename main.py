@@ -23,5 +23,21 @@ def run_binary_model():
     model.test(verbose=True)
     #model.output_test_space(verbose=True)
 
+def run_linear_model():
+    model_cfg = {
+        #'epochs': 5000,
+        #'batch_size': 4,
+        #'num_concepts': 6,
+        #'test_prop': 0.2,
+        #'e_dense_size': 20,
+        #'sentence_len': 6,
+    }
+    logdir = 'log'
+    if os.path.isdir(logdir):
+        shutil.rmtree(logdir)
+    model = em.LinearModel(cfg=model_cfg, logdir=logdir)
+    model.run(verbose=True)
+    model.test(verbose=True)
+
 if __name__ == '__main__':
-    run_binary_model()
+    run_linear_model()

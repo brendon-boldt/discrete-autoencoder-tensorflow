@@ -2,82 +2,54 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.keras
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (Dense, Dropout, Input, Concatenate,
-        BatchNormalization, RepeatVector, Lambda, Flatten)
+from tensorflow.keras.layers import (Concatenate, Dense, Input, Lambda, Flatten, Conv1D)
 from tensorflow.keras.initializers import RandomNormal
 from tensorflow_probability.python.distributions import RelaxedOneHotCategorical
 from numpy.random import shuffle
 from numpy.linalg import matrix_rank
 
 from .. import util
+from ..world.linear import Linear as World
 
-class Binary:
-    """A model describing communicating an arbitrary vector which is first
-    transformed into a random embedding."""
-
-    @staticmethod
-    def train_test_split(arr, test_split=1.0):
-        """Roughly split the data ensuring that the train set has a span of the
-        whole space."""
-        indexes = list(range(len(arr)))
-        shuffle(indexes)
-        train, test = [], []
-        n = arr.shape[1]
-        covered = []
-        for i in indexes:
-            mr_covered = matrix_rank(covered)
-            if sum(arr[i]) == 0.:
-                continue
-                # The zero vector is a degenerate case, and I do not believe it
-                # is worth including
-                #test.append(i)
-                #train.append(i)
-            if mr_covered == n:
-                if len(test)/len(arr) < test_split:
-                    test.append(i)
-                else:
-                    train.append(i)
-            else:
-                covered.append(arr[i])
-                train.append(i)
-
-        return train, test 
-
-    @staticmethod
-    def permutations(n):
-        ma = [2**i for i in range(n)]
-        arr = []
-        for i in range(2**n):
-            arr.append([i//b % 2 for b in ma])
-        return np.array(arr)
+class Linear:
+    """A model for describing simple mutations of a 1d world."""
 
     default_cfg = {
         # Actual batch_size == batch_size * num_concepts
         'batch_size': 7,
-        'epochs': 5000,
+        'epochs': 2000,
          # How often to anneal temperature
          # More like a traditional epoch due to small dataset size
         'superepoch': 200,
-        'e_dense_size': 14,
-        'd_dense_size': 2,
-        'input_dim': 8,
-        'num_concepts': 7,
-        'sentence_len': 7,
-        'vocab_size': 2,
+        'e_dense_size': 30,
+        'd_dense_size': 5,
+        #'input_dim': 8,
+        'world_size': 10,
+        'world_depth': 5,
+        'world_init_objs': 3,
+        'conv_filters': 3,
+        'conv_kernel_size': 3,
+        #'num_concepts': 7,
+        'num_worlds': 400,
+        'sentence_len': 4,
+        'vocab_size': 10,
 
         'learning_rate': 1e-2,
         'temp_init': 3,
         'temp_decay': 0.85,
         'train_st': False,
         'test_prop': 0.1,
-        'dropout_rate': 0.2,
+        'dropout_rate': 0.1,
     }
 
     def __init__(self, cfg=None, logdir='log'):
         if cfg is None:
-            self.cfg = Binary.default_cfg
+            self.cfg = Linear.default_cfg
         else:
-            self.cfg = {**Binary.default_cfg, **cfg} 
+            self.cfg = {**Linear.default_cfg, **cfg} 
+
+        self.world_shape = (self.cfg['world_size'], self.cfg['world_depth'])
+
         self.sess = tf.Session()
         self.initialize_graph()
         self.generate_train_and_test()
@@ -101,23 +73,41 @@ class Binary:
         return tf.cond(self.straight_through, lambda: y, lambda: sample)
 
     def initialize_encoder(self):
-        unstopped_inputs = Input(shape=(self.cfg['num_concepts'],), name='e_input')
-        self.e_inputs = tf.stop_gradient(unstopped_inputs)
+        #unstopped_inputs = Input(shape=(self.cfg['num_concepts'],), name='e_input')
+        #self.e_inputs = tf.stop_gradient(unstopped_inputs)
 
-        # Generate a static vector space of "concepts"
-        e_embeddings_w = tf.Variable(
-                tf.initializers.truncated_normal(0, 1e0)(
-                    (self.cfg['num_concepts'], self.cfg['input_dim'])),
-                dtype=tf.float32,
-                trainable=False,
+        ## Generate a static vector space of "concepts"
+        #e_embeddings_w = tf.Variable(
+        #        tf.initializers.truncated_normal(0, 1e0)(
+        #            (self.cfg['num_concepts'], self.cfg['input_dim'])),
+        #        dtype=tf.float32,
+        #        trainable=False,
+        #        )
+        #    
+        #e_x = tf.matmul(self.e_inputs, e_embeddings_w)
+        self.world_0 = Input(shape=self.world_shape, dtype=tf.float32)
+        self.world_goal = Input(shape=self.world_shape, dtype=tf.float32)
+
+        e_conv = Conv1D(
+                filters=self.cfg['conv_filters'],
+                kernel_size=self.cfg['conv_kernel_size'],
+                activation='relu',
+                use_bias=False,
+                name='e_conv',
                 )
-            
-        e_x = tf.matmul(self.e_inputs, e_embeddings_w)
 
+        e_conv_flatten = Flatten(name='e_conv_flatten')
+
+        e_world_0 = e_conv_flatten(e_conv(self.world_0))
+        e_world_goal = e_conv_flatten(e_conv(self.world_goal))
+        e_x = Concatenate()([e_world_0, e_world_goal])
         # Dense layer for encocder
         e_x = Dense(self.cfg['e_dense_size'],
                 activation='relu',
-                name='encoder_h0')(e_x)
+                name='e_conv_dense'
+                )(e_x)
+        # TODO What kind of interaction should this be?
+        #e_x = e_world_0 * e_world_goal
         #e_x = tf.layers.batch_normalization(e_x, renorm=True)
         e_x = Dense(self.cfg['vocab_size']*self.cfg['sentence_len'],
                 name="encoder_word_dense")(e_x)
@@ -186,13 +176,35 @@ class Binary:
         d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b)
         d_x = Flatten(name='decoder_flatten')(d_x)
 
+        self.world_0 # -> conv -> flatten -> concatenate
+        d_conv = Conv1D(
+                filters=self.cfg['conv_filters'],
+                kernel_size=self.cfg['conv_kernel_size'],
+                activation='relu',
+                use_bias=False,
+                name='d_conv',
+                )
+
+        d_x = Concatenate()(
+                [d_x, Flatten(name='e_conv_flatten')(d_conv(self.world_0))]
+                )
+
+
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
 
-        d_x = Dense(self.cfg['input_dim'], activation=None,
-                name='decoder_output')(d_x)
-        self.d_output = Dense(self.cfg['num_concepts'],
+        d_x = Dense(
+                #np.prod(self.world_shape),
+                self.cfg['d_dense_size'],
+                activation=None,
+                name='decoder_output'
+                )(d_x)
+
+
+        #self.d_output = Dense(self.cfg['num_concepts'],
+        d_x = Dense(np.prod(self.world_shape),
                 name="decoder_class",
                 activation=None,)(d_x)
+        self.d_output = tf.reshape(d_x, (-1,) + self.world_shape)
         self.d_sigmoid = tf.nn.sigmoid(self.d_output)
 
     def initialize_graph(self):
@@ -217,7 +229,7 @@ class Binary:
         with tf.name_scope("training"):
             optmizier = tf.train.AdamOptimizer(self.cfg['learning_rate'])
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                    logits=self.d_output, labels=self.e_inputs)
+                    logits=self.d_output, labels=self.world_goal)
             tf.summary.scalar('loss', tf.reduce_mean(self.loss))
 
             self.train_step = optmizier.minimize(self.loss)
@@ -227,28 +239,48 @@ class Binary:
         self.summary = tf.summary.merge_all()
 
     def generate_train_and_test(self):
-        all_input = Binary.permutations(self.cfg['num_concepts'])
-        shuffle(all_input)
-        train_i, test_i = Binary.train_test_split(
-                all_input,
-                self.cfg['test_prop']
-                )
-        train_i = np.repeat(train_i, self.cfg['batch_size'], axis=0)
-        shuffle(train_i)
+        #all_input = Binary.permutations(self.cfg['num_concepts'])
+        #shuffle(all_input)
+        #train_i, test_i = Binary.train_test_split(
+        #        all_input,
+        #        self.cfg['test_prop']
+        #        )
+        #train_i = np.repeat(train_i, self.cfg['batch_size'], axis=0)
+        #shuffle(train_i)
 
-        # Inputs and labels are the same, so duplciate them
-        train_data = all_input[train_i]
-        test_data = all_input[test_i]
+        ## Inputs and labels are the same, so duplciate them
+        #train_data = all_input[train_i]
+        #test_data = all_input[test_i]
+
+        train_data = []
+        test_data = []
+        # TODO Do this counting better
+        for _ in range(self.cfg['num_worlds']):
+            w = World(*self.world_shape, self.cfg['world_init_objs'])
+            train_data.append((w, w.apply(World.random_swap1())))
+            train_data.append((w, w.apply(World.random_create())))
+            train_data.append((w, w.apply(World.random_destroy())))
+        train_data = list(zip(*train_data))
+
+        for _ in range(self.cfg['num_worlds'] // 8):
+            w = World(*self.world_shape, self.cfg['world_init_objs'])
+            test_data.append((w, w.apply(World.random_swap1())))
+            test_data.append((w, w.apply(World.random_create())))
+            test_data.append((w, w.apply(World.random_destroy())))
+        test_data = list(zip(*test_data))
+        
 
         self.train_fd = {
-            self.e_inputs.name: train_data,
+            self.world_0.name: [w.world for w in train_data[0]],
+            self.world_goal.name: [w.world for w in train_data[1]],
             self.temperature.name: self.cfg['temp_init'],
             self.straight_through.name: self.cfg['train_st'],
             self.dropout_rate.name: self.cfg['dropout_rate'],
             self.use_argmax.name: False,
         }
         self.test_fd = {
-            self.e_inputs.name: test_data,
+            self.world_0.name: [w.world for w in test_data[0]],
+            self.world_goal.name: [w.world for w in test_data[1]],
             self.temperature.name: self.cfg['temp_init'], # Unused
             self.straight_through.name: True, # Unused
             self.dropout_rate.name: 0., # Unused
@@ -318,13 +350,3 @@ class Binary:
             print(f"test loss\t"
                   f"avg: {np.average(losses):.3f}\t"
                   f"max: {np.max(losses):.3f}")
-
-    def output_test_space(self, verbose=False):
-        # Not yet implemented
-        inputs = Binary.permutations(self.cfg['num_concepts'])
-        fd = {**self.train_fd, self.e_inputs.name: inputs}
-        results = self.sess.run(self.d_sigmoid, feed_dict=fd)
-        utterances = self.sess.run(self.utterance, feed_dict=fd)
-        for i in range(2**self.cfg['num_concepts']):
-            sent = util.ohvs_to_words(utterances[i])
-            print(f'{inputs[i]} -> {sent} -> {results[i]}')

@@ -6,6 +6,42 @@ import numpy as np
 
 class Linear:
 
+    @staticmethod
+    def random_swap1():
+        move = random.randint(0, 1) * 2 - 1
+        def f(w):
+            #random.choice([i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
+            if move > 0:
+                x = random.choice(
+                        [i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
+            else:
+                x = random.choice(
+                        [i for i, x in enumerate(w.world[1:]) if x[0] == 0])
+            w.world[x], w.world[x+move] = (np.copy(w.world[x+move]),
+                    np.copy(w.world[x]))
+        return f
+
+    @staticmethod
+    def random_create():
+        def f(w):
+            non_objs = [i for i, x in enumerate(w.world) if x[0] == 1]
+            not_present = set(range(w.depth)) - set(w.as_argmax())
+            x = random.choice(non_objs)
+            #w.world[x, random.randint(1, w.depth-1)] = 1
+            w.world[x, random.choice(list(not_present))] = 1
+            w.world[x, 0] = 0
+        return f
+
+    @staticmethod
+    def random_destroy():
+        def f(w):
+            objs = [i for i, x in enumerate(w.world) if x[0] == 0]
+            x = random.choice(objs)
+            w.world[x, w.world[x].argmax()] = 0
+            w.world[x, 0] = 1
+        return f
+
+
     def __init__(self, size, depth, n_objects=None):
        self.size = size
        self.depth = depth
@@ -59,39 +95,6 @@ class Linear:
         w = self.copy()
         mutate(w)
         return w
-
-def random_swap1():
-    move = random.randint(0, 1) * 2 - 1
-    def f(w):
-        #random.choice([i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
-        if move > 0:
-            x = random.choice(
-                    [i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
-        else:
-            x = random.choice(
-                    [i for i, x in enumerate(w.world[1:]) if x[0] == 0])
-        w.world[x], w.world[x+move] = (np.copy(w.world[x+move]),
-                np.copy(w.world[x]))
-    return f
-
-
-def random_create():
-    def f(w):
-        non_objs = [i for i, x in enumerate(w.world) if x[0] == 1]
-        not_present = set(range(w.depth)) - set(w.as_argmax())
-        x = random.choice(non_objs)
-        #w.world[x, random.randint(1, w.depth-1)] = 1
-        w.world[x, random.choice(list(not_present))] = 1
-        w.world[x, 0] = 0
-    return f
-
-def random_destroy():
-    def f(w):
-        objs = [i for i, x in enumerate(w.world) if x[0] == 0]
-        x = random.choice(objs)
-        w.world[x, w.world[x].argmax()] = 0
-        w.world[x, 0] = 1
-    return f
 
 if __name__ == '__main__':
     w = Linear(10, 7, 4)
