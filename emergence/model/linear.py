@@ -16,22 +16,20 @@ class Linear:
 
     default_cfg = {
         # Actual batch_size == batch_size * num_concepts
-        'batch_size': 7,
-        'epochs': 2000,
+        'batch_size': 20,
+        'epochs': 10000,
          # How often to anneal temperature
          # More like a traditional epoch due to small dataset size
-        'superepoch': 200,
-        'e_dense_size': 30,
-        'd_dense_size': 5,
-        #'input_dim': 8,
+        'superepoch': 2000,
+        'e_dense_size': 50,
+        'd_dense_size': 10,
         'world_size': 10,
-        'world_depth': 5,
-        'world_init_objs': 3,
-        'conv_filters': 3,
-        'conv_kernel_size': 3,
-        #'num_concepts': 7,
-        'num_worlds': 400,
-        'sentence_len': 4,
+        'world_depth': 2,
+        'world_init_objs': 2,
+        'conv_filters': 4,
+        'conv_kernel_size': 2,
+        'num_worlds': 800,
+        'sentence_len': 2,
         'vocab_size': 10,
 
         'learning_rate': 1e-2,
@@ -39,7 +37,7 @@ class Linear:
         'temp_decay': 0.85,
         'train_st': False,
         'test_prop': 0.1,
-        'dropout_rate': 0.1,
+        'dropout_rate': 0.0,
     }
 
     def __init__(self, cfg=None, logdir='log'):
@@ -73,18 +71,6 @@ class Linear:
         return tf.cond(self.straight_through, lambda: y, lambda: sample)
 
     def initialize_encoder(self):
-        #unstopped_inputs = Input(shape=(self.cfg['num_concepts'],), name='e_input')
-        #self.e_inputs = tf.stop_gradient(unstopped_inputs)
-
-        ## Generate a static vector space of "concepts"
-        #e_embeddings_w = tf.Variable(
-        #        tf.initializers.truncated_normal(0, 1e0)(
-        #            (self.cfg['num_concepts'], self.cfg['input_dim'])),
-        #        dtype=tf.float32,
-        #        trainable=False,
-        #        )
-        #    
-        #e_x = tf.matmul(self.e_inputs, e_embeddings_w)
         self.world_0 = Input(shape=self.world_shape, dtype=tf.float32)
         self.world_goal = Input(shape=self.world_shape, dtype=tf.float32)
 
@@ -101,14 +87,10 @@ class Linear:
         e_world_0 = e_conv_flatten(e_conv(self.world_0))
         e_world_goal = e_conv_flatten(e_conv(self.world_goal))
         e_x = Concatenate()([e_world_0, e_world_goal])
-        # Dense layer for encocder
         e_x = Dense(self.cfg['e_dense_size'],
                 activation='relu',
                 name='e_conv_dense'
                 )(e_x)
-        # TODO What kind of interaction should this be?
-        #e_x = e_world_0 * e_world_goal
-        #e_x = tf.layers.batch_normalization(e_x, renorm=True)
         e_x = Dense(self.cfg['vocab_size']*self.cfg['sentence_len'],
                 name="encoder_word_dense")(e_x)
 
@@ -203,7 +185,9 @@ class Linear:
         #self.d_output = Dense(self.cfg['num_concepts'],
         d_x = Dense(np.prod(self.world_shape),
                 name="decoder_class",
-                activation=None,)(d_x)
+                activation=None,
+                use_bias=False,
+                )(d_x)
         self.d_output = tf.reshape(d_x, (-1,) + self.world_shape)
         self.d_sigmoid = tf.nn.sigmoid(self.d_output)
 
@@ -230,6 +214,7 @@ class Linear:
             optmizier = tf.train.AdamOptimizer(self.cfg['learning_rate'])
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     logits=self.d_output, labels=self.world_goal)
+
             tf.summary.scalar('loss', tf.reduce_mean(self.loss))
 
             self.train_step = optmizier.minimize(self.loss)
@@ -239,31 +224,20 @@ class Linear:
         self.summary = tf.summary.merge_all()
 
     def generate_train_and_test(self):
-        #all_input = Binary.permutations(self.cfg['num_concepts'])
-        #shuffle(all_input)
-        #train_i, test_i = Binary.train_test_split(
-        #        all_input,
-        #        self.cfg['test_prop']
-        #        )
-        #train_i = np.repeat(train_i, self.cfg['batch_size'], axis=0)
-        #shuffle(train_i)
-
-        ## Inputs and labels are the same, so duplciate them
-        #train_data = all_input[train_i]
-        #test_data = all_input[test_i]
-
         train_data = []
         test_data = []
         # TODO Do this counting better
         for _ in range(self.cfg['num_worlds']):
-            w = World(*self.world_shape, self.cfg['world_init_objs'])
+            w = World(*self.world_shape, self.cfg['world_init_objs'],
+                    unique_objs=False)
             train_data.append((w, w.apply(World.random_swap1())))
             train_data.append((w, w.apply(World.random_create())))
             train_data.append((w, w.apply(World.random_destroy())))
         train_data = list(zip(*train_data))
 
         for _ in range(self.cfg['num_worlds'] // 8):
-            w = World(*self.world_shape, self.cfg['world_init_objs'])
+            w = World(*self.world_shape, self.cfg['world_init_objs'],
+                    unique_objs=False)
             test_data.append((w, w.apply(World.random_swap1())))
             test_data.append((w, w.apply(World.random_create())))
             test_data.append((w, w.apply(World.random_destroy())))
@@ -271,16 +245,16 @@ class Linear:
         
 
         self.train_fd = {
-            self.world_0.name: [w.world for w in train_data[0]],
-            self.world_goal.name: [w.world for w in train_data[1]],
+            self.world_0.name: np.array([w.world for w in train_data[0]]),
+            self.world_goal.name: np.array([w.world for w in train_data[1]]),
             self.temperature.name: self.cfg['temp_init'],
             self.straight_through.name: self.cfg['train_st'],
             self.dropout_rate.name: self.cfg['dropout_rate'],
             self.use_argmax.name: False,
         }
         self.test_fd = {
-            self.world_0.name: [w.world for w in test_data[0]],
-            self.world_goal.name: [w.world for w in test_data[1]],
+            self.world_0.name: np.array([w.world for w in test_data[0]]),
+            self.world_goal.name: np.array([w.world for w in test_data[1]]),
             self.temperature.name: self.cfg['temp_init'], # Unused
             self.straight_through.name: True, # Unused
             self.dropout_rate.name: 0., # Unused
@@ -291,7 +265,16 @@ class Linear:
     def run(self, verbose=False):
         # The labels are unused because they are the same as the input
         for i in range(self.cfg['epochs']):
-            self.sess.run(self.train_step, feed_dict=self.train_fd)
+            indexes = np.random.choice(np.arange(len(self.train_fd[self.world_0.name]), dtype=np.int64), size=self.cfg['batch_size'])
+            epoch_fd = {
+                    **self.train_fd,
+                    self.world_0.name:
+                        self.train_fd[self.world_0.name][indexes],
+                    self.world_goal.name:
+                        self.train_fd[self.world_goal.name][indexes],
+                    }
+            self.sess.run(self.train_step, feed_dict=epoch_fd)
+
             if i % self.cfg['superepoch'] == 0:
                 self.train_fd[self.temperature.name] *= self.cfg['temp_decay']
 
@@ -346,7 +329,87 @@ class Linear:
         # The labels are unused because they are the same as the input
         all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
         losses = np.apply_along_axis(np.average, -1, all_losses)
+        # TODO Add accuracy
         if verbose:
             print(f"test loss\t"
                   f"avg: {np.average(losses):.3f}\t"
                   f"max: {np.max(losses):.3f}")
+
+    def examples(self, n):
+        outputs, raw_utts = self.sess.run((self.d_output, self.utterance), feed_dict=self.test_fd)
+        argmaxes = lambda x: np.array([np.argmax(y) for y in x])
+        utts = np.array([argmaxes(x) for x in raw_utts])
+
+        indexes = [i for i, x in enumerate(utts) if x[0] == 0]
+        for i in range(min(n, outputs.shape[0])):
+            print(argmaxes(self.test_fd[self.world_0.name][indexes][i]))
+            print(argmaxes(self.test_fd[self.world_goal.name][indexes][i]))
+
+            print(utts[indexes][i])
+
+            print(argmaxes(outputs[indexes][i]))
+            print()
+
+    def interactive_test_world(self):
+        while True:
+            try:
+                oh_0 = [int(x) for x in input("w_0\t").split()]
+                oh_goal  = [int(x) for x in input("w_goal\t").split()]
+            except ValueError:
+                pass
+            if 99 in oh_0 or 99 in oh_goal:
+                break
+            oh_0 += [0]*(self.world_shape[0] - len(oh_0))
+            oh_goal += [0]*(self.world_shape[0] - len(oh_goal))
+            w_0 = np.zeros(self.world_shape)
+            w_goal = np.zeros(self.world_shape)
+            w_0[np.arange(self.world_shape[0]), oh_0] = 1
+            w_goal[np.arange(self.world_shape[0]), oh_goal] = 1
+
+            fd = {
+                    **self.test_fd,
+                    self.world_0.name: [w_0],
+                    self.world_goal.name: [w_goal], 
+                    }
+
+            outputs, raw_utts = self.sess.run((self.d_output, self.utterance),
+                    feed_dict=fd)
+            argmaxes = lambda x: np.array([np.argmax(y) for y in x])
+            utts = np.array([argmaxes(x) for x in raw_utts])
+            print(utts[0])
+            print(argmaxes(outputs[0]))
+
+    def interactive_test_utterance(self):
+        raise NotImplementedError
+        while True:
+            try:
+                raw_utt = [int(x) for x in input("utt\t").split()]
+            except ValueError:
+                pass
+            if 99 in raw_utt:
+                break
+            if 98 in raw_utt:
+                pass # New world
+
+            oh_0 += [0]*(self.world_shape[0] - len(oh_0))
+            oh_goal += [0]*(self.world_shape[0] - len(oh_goal))
+            w_0 = np.zeros(self.world_shape)
+            w_goal = np.zeros(self.world_shape)
+            w_0[np.arange(self.world_shape[0]), oh_0] = 1
+            w_goal[np.arange(self.world_shape[0]), oh_goal] = 1
+
+            fd = {
+                    **self.test_fd,
+                    self.world_0.name: [w_0],
+                    self.world_goal.name: [w_goal], 
+                    }
+
+            outputs, raw_utts = self.sess.run((self.d_output, self.utterance),
+                    feed_dict=fd)
+            argmaxes = lambda x: np.array([np.argmax(y) for y in x])
+            utts = np.array([argmaxes(x) for x in raw_utts])
+            print(utts[0])
+            print(argmaxes(outputs[0]))
+
+
+

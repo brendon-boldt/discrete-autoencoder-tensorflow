@@ -11,14 +11,17 @@ class Linear:
         move = random.randint(0, 1) * 2 - 1
         def f(w):
             #random.choice([i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
-            if move > 0:
-                x = random.choice(
-                        [i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
-            else:
-                x = random.choice(
-                        [i for i, x in enumerate(w.world[1:]) if x[0] == 0])
-            w.world[x], w.world[x+move] = (np.copy(w.world[x+move]),
-                    np.copy(w.world[x]))
+            try:
+                if move > 0:
+                    x = random.choice(
+                            [i for i, x in enumerate(w.world[:-1]) if x[0] == 0])
+                else:
+                    x = random.choice(
+                            [i for i, x in enumerate(w.world[1:]) if x[0] == 0])
+                w.world[x], w.world[x+move] = (np.copy(w.world[x+move]),
+                        np.copy(w.world[x]))
+            except IndexError:
+                pass
         return f
 
     @staticmethod
@@ -27,8 +30,10 @@ class Linear:
             non_objs = [i for i, x in enumerate(w.world) if x[0] == 1]
             not_present = set(range(w.depth)) - set(w.as_argmax())
             x = random.choice(non_objs)
-            #w.world[x, random.randint(1, w.depth-1)] = 1
-            w.world[x, random.choice(list(not_present))] = 1
+            if w.unique_objs:
+                w.world[x, random.choice(list(not_present))] = 1
+            else:
+                w.world[x, random.randint(1, w.depth-1)] = 1
             w.world[x, 0] = 0
         return f
 
@@ -42,12 +47,16 @@ class Linear:
         return f
 
 
-    def __init__(self, size, depth, n_objects=None):
+    def __init__(self, size, depth, n_objects=None, unique_objs=True):
        self.size = size
        self.depth = depth
+       self.unique_objs = unique_objs
        if n_objects is not None:
-           #self.world = self.make_random_world(n_objects)
-           self.world = self.make_world(n_objects)
+           if unique_objs:
+               self.world = self.make_world(n_objects)
+           else:
+               self.world = self.make_random_world(n_objects)
+
 
     def make_world(self, n_objects):
         obj_locs = list(range(self.size))
@@ -87,7 +96,7 @@ class Linear:
         return (self.world == other.world).all()
 
     def copy(self):
-        w = Linear(self.size, self.depth, None)
+        w = Linear(self.size, self.depth, None, self.unique_objs)
         w.world = np.copy(self.world)
         return w
 
