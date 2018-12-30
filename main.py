@@ -26,7 +26,7 @@ def run_binary_model():
 def run_linear_model():
     model_cfg = {
         'epochs': 20000,
-        'dropout_rate': 0.1,
+        'dropout_rate': 0.5,
     }
     logdir = 'log'
     if os.path.isdir(logdir):

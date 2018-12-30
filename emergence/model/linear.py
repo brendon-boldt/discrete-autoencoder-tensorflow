@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.keras
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (Concatenate, Dense, Input, Lambda, Flatten, Conv1D)
+from tensorflow.keras.layers import (Reshape, Concatenate, Dense, Input, Lambda, Flatten, Conv1D)
 from tensorflow.keras.initializers import RandomNormal
 from tensorflow_probability.python.distributions import RelaxedOneHotCategorical
 from numpy.random import shuffle
@@ -48,6 +48,8 @@ class Linear:
 
         self.world_shape = (self.cfg['world_size'], self.cfg['world_depth'])
 
+        self.stored_layers = {}
+
         self.sess = tf.Session()
         self.initialize_graph()
         self.generate_train_and_test()
@@ -60,6 +62,16 @@ class Linear:
                 self.sess.graph
                 )
 
+    def get_layer(self, name, layer_type, *args, **kwargs):
+        scope = tf.get_variable_scope().name + '/'
+        reuse = tf.get_variable_scope().reuse
+        if scope + name in self.stored_layers and reuse:
+            return self.stored_layers[scope + name]
+        layer = layer_type(*args, name=name, **kwargs)
+        if reuse:
+            self.stored_layers[scope + name] = layer
+        return layer
+
     def gs_sampler(self, logits):
         """Sampling function for Gumbel-Softmax"""
         dist = RelaxedOneHotCategorical(temperature=self.temperature, logits=logits)
@@ -70,42 +82,53 @@ class Linear:
 
         return tf.cond(self.straight_through, lambda: y, lambda: sample)
 
-    def initialize_encoder(self):
-        self.world_0 = Input(shape=self.world_shape, dtype=tf.float32)
-        self.world_goal = Input(shape=self.world_shape, dtype=tf.float32)
-
-        e_conv = Conv1D(
+    def initialize_encoder(self, world_0, world_goal):
+        e_conv = self.get_layer(
+                'e_conv',
+                Conv1D,
                 filters=self.cfg['conv_filters'],
                 kernel_size=self.cfg['conv_kernel_size'],
                 activation='relu',
                 use_bias=False,
-                name='e_conv',
                 )
 
-        e_conv_flatten = Flatten(name='e_conv_flatten')
+        e_conv_flatten = self.get_layer(
+                'e_conv_flatten',
+                Flatten,
+                )
 
         e_world_0 = e_conv_flatten(e_conv(self.world_0))
         e_world_goal = e_conv_flatten(e_conv(self.world_goal))
-        e_x = Concatenate()([e_world_0, e_world_goal])
-        e_x = Dense(self.cfg['e_dense_size'],
+
+        e_x = self.get_layer('e_concat', Concatenate)([e_world_0, e_world_goal])
+        e_x = self.get_layer(
+                'e_conv_dense',
+                Dense,
+                self.cfg['e_dense_size'],
                 activation='relu',
-                name='e_conv_dense'
                 )(e_x)
-        e_x = Dense(self.cfg['vocab_size']*self.cfg['sentence_len'],
-                name="encoder_word_dense")(e_x)
+        e_x = self.get_layer(
+                "e_word_dense",
+                Dense,
+                self.cfg['vocab_size']*self.cfg['sentence_len'],
+                )(e_x)
 
-        self.e_raw_output = tf.keras.layers.Reshape((self.cfg['sentence_len'],
-                self.cfg['vocab_size']))(e_x)
+        e_raw_output = self.get_layer(
+                'e_word_reshape',
+                Reshape,
+                (self.cfg['sentence_len'], self.cfg['vocab_size']),
+                )(e_x)
+        return e_raw_output
 
-    def initialize_communication(self):
+    def initialize_communication(self, raw_outputs):
         categorical_output = self.gs_sampler
 
         argmax_selector = lambda: tf.one_hot(
                 tf.argmax(self.e_raw_output, -1),
                 self.e_raw_output.shape[-1]
                 )
-        gumbel_softmax_selector = lambda: Lambda(categorical_output)(self.e_raw_output)
-        self.utterance = tf.cond(self.use_argmax,
+        gumbel_softmax_selector = lambda: Lambda(categorical_output)(raw_outputs)
+        utterance = tf.cond(self.use_argmax,
                 argmax_selector,
                 gumbel_softmax_selector,
                 name="argmax_cond",
@@ -114,15 +137,16 @@ class Linear:
         dropout_lambda = Lambda(
                 lambda x: tf.layers.dropout(
                     x,
-                    noise_shape=(tf.shape(self.utterance)[0], self.cfg['sentence_len'], 1),
+                    noise_shape=(tf.shape(utterance)[0], self.cfg['sentence_len'], 1),
                     rate=self.dropout_rate,
                     training=tf.logical_not(self.use_argmax),
                     ),
                 name="dropout_lambda",
                 )
-        self.utt_dropout = dropout_lambda(self.utterance)
+        utt_dropout = dropout_lambda(utterance)
+        return utterance, utt_dropout
 
-    def initialize_decoder(self):
+    def initialize_decoder(self, utt_dropout, world_0):
         weight_shape = (
                 1,
                 self.cfg['vocab_size'],
@@ -133,66 +157,75 @@ class Linear:
                 1, # Extra dim used below
                 self.cfg['d_dense_size'],
                 )
-        d_fc_w = tf.Variable(
-                tf.initializers.truncated_normal(
+        d_fc_w = tf.get_variable(
+                'd_fc_w',
+                initializer=tf.initializers.truncated_normal(
                     0., 1e-2)(tf.constant(weight_shape)),
                 dtype=tf.float32,
-                expected_shape=weight_shape,
                 )
-        d_fc_b = tf.Variable(
-                tf.constant(1e-1, shape=bias_shape),
+        d_fc_b = tf.get_variable(
+                'd_fc_b',
+                initializer=tf.constant(1e-1, shape=bias_shape),
                 dtype=tf.float32,
-                expected_shape=bias_shape,
                 )
 
-        batch_size = tf.shape(self.utt_dropout)[0]
+        batch_size = tf.shape(utt_dropout)[0]
 
         tiled = tf.reshape(
                 tf.tile(d_fc_w, (batch_size, self.cfg['sentence_len'], 1)),
                 (batch_size,) + (self.cfg['sentence_len'],) + weight_shape[1:],
                 )
         utt_dropout_reshaped = tf.reshape(
-                self.utt_dropout,
+                utt_dropout,
                 (-1, self.cfg['sentence_len'], 1, self.cfg['vocab_size']))
 
         d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b)
-        d_x = Flatten(name='decoder_flatten')(d_x)
-
-        self.world_0 # -> conv -> flatten -> concatenate
-        d_conv = Conv1D(
+        d_x = self.get_layer(
+                'decoder_flatten',
+                Flatten,
+                )(d_x)
+        d_conv = self.get_layer(
+                'd_conv',
+                Conv1D,
                 filters=self.cfg['conv_filters'],
                 kernel_size=self.cfg['conv_kernel_size'],
                 activation='relu',
                 use_bias=False,
-                name='d_conv',
                 )
 
-        d_x = Concatenate()(
-                [d_x, Flatten(name='e_conv_flatten')(d_conv(self.world_0))]
-                )
+        d_x = self.get_layer(
+                'd_concat',
+                Concatenate,
+                )([d_x, Flatten(name='e_conv_flatten')(d_conv(world_0))])
 
 
+        # I do not know if I need to get_layer() this
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
 
-        d_x = Dense(
+        d_x = self.get_layer(
+                'decoder_output',
+                Dense,
                 #np.prod(self.world_shape),
                 self.cfg['d_dense_size'],
                 activation=None,
-                name='decoder_output'
                 )(d_x)
 
 
         #self.d_output = Dense(self.cfg['num_concepts'],
-        d_x = Dense(np.prod(self.world_shape),
-                name="decoder_class",
+        d_x = self.get_layer(
+                "decoder_class",
+                Dense,
+                np.prod(self.world_shape),
                 activation=None,
                 use_bias=False,
                 )(d_x)
-        self.d_output = tf.reshape(d_x, (-1,) + self.world_shape)
-        self.d_sigmoid = tf.nn.sigmoid(self.d_output)
+        d_output = tf.reshape(d_x, (-1,) + self.world_shape)
+        d_sigmoid = tf.nn.sigmoid(d_output)
+        return d_output, d_sigmoid
 
     def initialize_graph(self):
-        with tf.name_scope("hyperparameters"):
+        #with tf.name_scope("hyperparameters"):
+        with tf.variable_scope("hyperparameters", reuse=tf.AUTO_REUSE):
             self.dropout_rate = tf.placeholder(tf.float32, shape=(),
                     name='dropout_rate')
             self.use_argmax = tf.placeholder(tf.bool, shape=(),
@@ -203,14 +236,19 @@ class Linear:
                     name='straight_through')
 
         with tf.name_scope("environment"):
-            with tf.name_scope("encoder"):
-                self.initialize_encoder()
-            with tf.name_scope("communication"):
-                self.initialize_communication()
-            with tf.name_scope("decoder"):
-                self.initialize_decoder()
+            with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
+                self.world_0 = Input(shape=self.world_shape, dtype=tf.float32)
+                self.world_goal = Input(shape=self.world_shape, dtype=tf.float32)
+                self.e_raw_output = self.initialize_encoder(
+                        self.world_0,
+                        self.world_goal
+                        )
+            with tf.variable_scope("communication", reuse=tf.AUTO_REUSE):
+                self.utterance, self.utt_dropout = self.initialize_communication(self.e_raw_output)
+            with tf.variable_scope("decoder", reuse=tf.AUTO_REUSE):
+                self.d_output, self.d_sigmoid = self.initialize_decoder(self.utt_dropout, self.world_0)
 
-        with tf.name_scope("training"):
+        with tf.variable_scope("training", reuse=tf.AUTO_REUSE):
             optmizier = tf.train.AdamOptimizer(self.cfg['learning_rate'])
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     logits=self.d_output, labels=self.world_goal)
