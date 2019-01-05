@@ -46,6 +46,27 @@ class Linear:
             w.world[x, 0] = 1
         return f
 
+    @staticmethod
+    def swap(x, dist):
+        def f(w):
+            w.world[x], w.world[x+dist] = (np.copy(w.world[x+dist]),
+                    np.copy(w.world[x]))
+        return f
+
+    @staticmethod
+    def create(x, obj):
+        def f(w):
+            w.world[x, obj] = 1
+            w.world[x, 0] = 0
+        return f
+
+    @staticmethod
+    def destroy(x):
+        def f(w):
+            w.world[x, w.world[x].argmax()] = 0
+            w.world[x, 0] = 1
+        return f
+
 
     def __init__(self, size, depth, n_objects=None, unique_objs=True):
        self.size = size

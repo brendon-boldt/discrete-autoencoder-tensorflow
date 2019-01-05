@@ -7,6 +7,7 @@ from tensorflow.keras.initializers import RandomNormal
 from tensorflow_probability.python.distributions import RelaxedOneHotCategorical
 from numpy.random import shuffle
 from numpy.linalg import matrix_rank
+from collections import Counter
 
 from .. import util
 from ..world.linear import Linear as World
@@ -17,20 +18,21 @@ class Linear:
     default_cfg = {
         # Actual batch_size == batch_size * num_concepts
         'batch_size': 20,
-        'epochs': 10000,
+        'epochs': 20000,
          # How often to anneal temperature
          # More like a traditional epoch due to small dataset size
         'superepoch': 2000,
-        'e_dense_size': 50,
-        'd_dense_size': 10,
+        'e_dense_size': 40,
+        'd_dense_size': 6,
+        'd_hidden_size': 20,
         'world_size': 10,
         'world_depth': 2,
         'world_init_objs': 2,
         'conv_filters': 4,
         'conv_kernel_size': 2,
         'num_worlds': 800,
-        'sentence_len': 2,
-        'vocab_size': 10,
+        'sentence_len': 3,
+        'vocab_size': 13,
 
         'learning_rate': 1e-2,
         'temp_init': 3,
@@ -179,7 +181,9 @@ class Linear:
                 utt_dropout,
                 (-1, self.cfg['sentence_len'], 1, self.cfg['vocab_size']))
 
-        d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b)
+        #d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b)
+        d_x = tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b
+        #d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled))
         d_x = self.get_layer(
                 'decoder_flatten',
                 Flatten,
@@ -198,9 +202,15 @@ class Linear:
                 Concatenate,
                 )([d_x, Flatten(name='e_conv_flatten')(d_conv(world_0))])
 
-
         # I do not know if I need to get_layer() this
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
+
+        d_x = self.get_layer(
+                'd_hidden',
+                Dense,
+                self.cfg['d_hidden_size'],
+                activation='relu',
+                )(d_x)
 
         d_x = self.get_layer(
                 'decoder_output',
@@ -248,6 +258,11 @@ class Linear:
             with tf.variable_scope("decoder", reuse=tf.AUTO_REUSE):
                 self.d_output, self.d_sigmoid = self.initialize_decoder(self.utt_dropout, self.world_0)
 
+                # Experimental
+                self.input_ph = tf.placeholder(name='input_ph',
+                        shape=self.utt_dropout.shape, dtype=tf.float32)
+                _, self.test_sigmoid = self.initialize_decoder(self.input_ph, self.world_0)
+
         with tf.variable_scope("training", reuse=tf.AUTO_REUSE):
             optmizier = tf.train.AdamOptimizer(self.cfg['learning_rate'])
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
@@ -256,6 +271,19 @@ class Linear:
             tf.summary.scalar('loss', tf.reduce_mean(self.loss))
 
             self.train_step = optmizier.minimize(self.loss)
+
+        with tf.variable_scope("testing", reuse=tf.AUTO_REUSE):
+            equality = tf.cast(
+                    tf.math.equal(
+                            tf.argmax(self.d_output, -1),
+                            tf.argmax(self.world_goal, -1),
+                            ),
+                    tf.int32
+                    )
+            self.accuracy = (
+                    tf.reduce_sum(tf.reduce_prod(equality, -1))
+                    / tf.shape(equality)[0]
+                    )
 
         self.init_op = tf.initializers.global_variables()
         self.sess.run(self.init_op)
@@ -365,13 +393,15 @@ class Linear:
 
     def test(self, verbose=False):
         # The labels are unused because they are the same as the input
-        all_losses = self.sess.run(self.loss, feed_dict=self.test_fd)
+        all_losses, accuracy = self.sess.run(
+                (self.loss, self.accuracy), feed_dict=self.test_fd
+                )
         losses = np.apply_along_axis(np.average, -1, all_losses)
         # TODO Add accuracy
         if verbose:
             print(f"test loss\t"
                   f"avg: {np.average(losses):.3f}\t"
-                  f"max: {np.max(losses):.3f}")
+                  f"acc: {accuracy:.3f}")
 
     def examples(self, n):
         outputs, raw_utts = self.sess.run((self.d_output, self.utterance), feed_dict=self.test_fd)
@@ -418,7 +448,8 @@ class Linear:
             print(argmaxes(outputs[0]))
 
     def interactive_test_utterance(self):
-        raise NotImplementedError
+        w_0 = World(*self.world_shape, self.cfg['world_init_objs'],
+                unique_objs=False)
         while True:
             try:
                 raw_utt = [int(x) for x in input("utt\t").split()]
@@ -427,27 +458,76 @@ class Linear:
             if 99 in raw_utt:
                 break
             if 98 in raw_utt:
-                pass # New world
+                w_0 = World(*self.world_shape, self.cfg['world_init_objs'],
+                        unique_objs=False)
+                continue
 
-            oh_0 += [0]*(self.world_shape[0] - len(oh_0))
-            oh_goal += [0]*(self.world_shape[0] - len(oh_goal))
-            w_0 = np.zeros(self.world_shape)
-            w_goal = np.zeros(self.world_shape)
-            w_0[np.arange(self.world_shape[0]), oh_0] = 1
-            w_goal[np.arange(self.world_shape[0]), oh_goal] = 1
+            utt = np.zeros(
+                    (self.cfg['sentence_len'], self.cfg['vocab_size'])
+                    )
+            utt[np.arange(self.cfg['sentence_len']), raw_utt] = 1.
 
             fd = {
                     **self.test_fd,
-                    self.world_0.name: [w_0],
-                    self.world_goal.name: [w_goal], 
+                    self.world_0.name: [w_0.world],
+                    #self.world_goal.name: [w_goal], 
+                    self.input_ph.name: [utt],
                     }
 
-            outputs, raw_utts = self.sess.run((self.d_output, self.utterance),
+            outputs = self.sess.run(self.test_sigmoid,
                     feed_dict=fd)
             argmaxes = lambda x: np.array([np.argmax(y) for y in x])
-            utts = np.array([argmaxes(x) for x in raw_utts])
-            print(utts[0])
-            print(argmaxes(outputs[0]))
+            print(' '.join(w_0))
+            print(' '.join(argmaxes(outputs[0])))
+            print()
 
+    def get_word_counts(self):
+        fd = {
+                **self.test_fd,
+                self.world_0.name: self.train_fd[self.world_0.name],
+                self.world_goal.name: self.train_fd[self.world_goal.name],
+                }
+        raw_utts = self.sess.run( self.utterance, feed_dict=fd)
+        argmaxes = lambda x: [str(i)+':'+str(np.argmax(y)) for i, y in enumerate(x)]
+        #utts = [z for y in [argmaxes(x) for x in raw_utts] for z in y]
+        utts = [str(argmaxes(x)) for x in raw_utts]
+        counts = Counter(utts)
+        import code; code.interact(local=locals())
 
+    def test_mutation_locality(self, n=100):
+        print("Generating examples...")
+        #mutation = World.create(5, 1)
+        #mutation = World.swap(3,-1)
+        mutations = []
+        for i in range(3):
+            mutations += [World.create(i, 1), World.destroy(i)]
+        examples = [[] for _ in mutations]
+        while min(len(e) for e in examples) < n:
+            w_0 = World(*self.world_shape, self.cfg['world_init_objs'],
+                    unique_objs=False)
+            for e, m in zip(examples, mutations):
+                w_1 = w_0.apply(m)
+                if w_0 != w_1 and len(e) < n:
+                    e.append((w_0, w_1))
+        #examples = np.reshape(examples, (len(examples)*n, 2)).transpose()
+        print("Done.")
+
+        counts = []
+        for e in examples:
+            fd = {
+                    **self.test_fd,
+                    self.world_0.name: [x.world for x in np.transpose(e)[0]],
+                    self.world_goal.name: [x.world for x in np.transpose(e)[1]],
+                    }
+            # TODO Keep track of which ones are correct
+            raw_utts = self.sess.run(self.utterance, feed_dict=fd)
+            argmaxes = lambda x: [str(i)+':'+str(np.argmax(y)) for i, y in enumerate(x)]
+            utts = [z for y in [argmaxes(x) for x in raw_utts] for z in y]
+            counts.append(Counter(utts))
+            #print(counts)
+        for i, x in enumerate(counts):
+            for y in counts[i+1:]:
+                print(f'{util.get_word_alignment(x, y):.1f}', end='  ')
+            print()
+        import code; code.interact(local=locals())
 
