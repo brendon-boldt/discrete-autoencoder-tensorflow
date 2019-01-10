@@ -22,17 +22,17 @@ class Linear:
          # How often to anneal temperature
          # More like a traditional epoch due to small dataset size
         'superepoch': 2000,
-        'e_dense_size': 40,
-        'd_dense_size': 6,
-        'd_hidden_size': 20,
-        'world_size': 10,
+        'e_dense_size': 30,
+        'd_dense_size': 20,
+        'd_hidden_size': 30,
+        'world_size': 20,
         'world_depth': 2,
         'world_init_objs': 2,
         'conv_filters': 4,
         'conv_kernel_size': 2,
-        'num_worlds': 800,
-        'sentence_len': 3,
-        'vocab_size': 13,
+        'num_worlds': 20000,
+        'sentence_len': 2,
+        'vocab_size': 20,
 
         'learning_rate': 1e-2,
         'temp_init': 3,
@@ -205,23 +205,36 @@ class Linear:
         # I do not know if I need to get_layer() this
         d_x = tf.layers.batch_normalization(d_x, renorm=True)
 
+        NUM_FILTERS = 8
         d_x = self.get_layer(
                 'd_hidden',
                 Dense,
-                self.cfg['d_hidden_size'],
+                #self.cfg['d_hidden_size'],
+                self.cfg['world_size']*NUM_FILTERS,
                 activation='relu',
                 )(d_x)
 
-        d_x = self.get_layer(
-                'decoder_output',
-                Dense,
-                #np.prod(self.world_shape),
-                self.cfg['d_dense_size'],
-                activation=None,
-                )(d_x)
+        # Currently unused
+        d_x_conv = Reshape((self.cfg['world_size'], NUM_FILTERS))(d_x)
 
+        d_filter_w = tf.get_variable(
+                'd_filter_w',
+                initializer=tf.initializers.truncated_normal(mean=0.,
+                    # Fix this stupidity
+                    stddev=1e-2)((1, 2, NUM_FILTERS)),
+                dtype=tf.float32,
+                )
 
-        #self.d_output = Dense(self.cfg['num_concepts'],
+        # Currently unused
+        d_x_conv = tf.contrib.nn.conv1d_transpose(
+                d_x_prime,
+                d_filter_w,
+                #(batch_size, self.cfg['world_size'], 2),
+                (batch_size, self.cfg['world_size'], 2),
+                1,
+                name='d_conv_transpose',
+                )
+
         d_x = self.get_layer(
                 "decoder_class",
                 Dense,
@@ -229,6 +242,7 @@ class Linear:
                 activation=None,
                 use_bias=False,
                 )(d_x)
+        #d_output = d_x_prime
         d_output = tf.reshape(d_x, (-1,) + self.world_shape)
         d_sigmoid = tf.nn.sigmoid(d_output)
         return d_output, d_sigmoid
@@ -273,54 +287,63 @@ class Linear:
             self.train_step = optmizier.minimize(self.loss)
 
         with tf.variable_scope("testing", reuse=tf.AUTO_REUSE):
-            equality = tf.cast(
+            word_correct = tf.cast(
                     tf.math.equal(
                             tf.argmax(self.d_output, -1),
                             tf.argmax(self.world_goal, -1),
                             ),
                     tf.int32
                     )
+            self.correct = tf.reduce_prod(word_correct, axis=-1)
             self.accuracy = (
-                    tf.reduce_sum(tf.reduce_prod(equality, -1))
-                    / tf.shape(equality)[0]
+                    #tf.reduce_sum(tf.reduce_prod(self.correct, -1))
+                    tf.reduce_sum(self.correct, -1)
+                    / tf.shape(self.correct)[0]
                     )
 
         self.init_op = tf.initializers.global_variables()
         self.sess.run(self.init_op)
         self.summary = tf.summary.merge_all()
 
-    def generate_train_and_test(self):
-        train_data = []
-        test_data = []
-        # TODO Do this counting better
-        for _ in range(self.cfg['num_worlds']):
+    def generate_train_and_test(self, verbose=False):
+        data_set = set()
+        i = 0
+        while len(data_set) < self.cfg['num_worlds']:
             w = World(*self.world_shape, self.cfg['world_init_objs'],
                     unique_objs=False)
-            train_data.append((w, w.apply(World.random_swap1())))
-            train_data.append((w, w.apply(World.random_create())))
-            train_data.append((w, w.apply(World.random_destroy())))
-        train_data = list(zip(*train_data))
+            data_set.add((w, w.apply(World.random_swap1())))
+            data_set.add((w, w.apply(World.random_create())))
+            data_set.add((w, w.apply(World.random_destroy())))
+            i += 1
+            if i > self.cfg['world_size'] ** 3:
+                if verbose:
+                    print(f"Warning: only generated "
+                    f"{len(data_set)}/{self.cfg['num_worlds']} worlds")
+                break
 
-        for _ in range(self.cfg['num_worlds'] // 8):
-            w = World(*self.world_shape, self.cfg['world_init_objs'],
-                    unique_objs=False)
-            test_data.append((w, w.apply(World.random_swap1())))
-            test_data.append((w, w.apply(World.random_create())))
-            test_data.append((w, w.apply(World.random_destroy())))
-        test_data = list(zip(*test_data))
+        data_list = list(data_set)
+        shuffle(data_list)
+        test_data = np.array([
+                (w[0].world, w[1].world)
+                    for w in data_list[:len(data_list) // 8]
+                ]).transpose((1, 0, 2, 3))
+        train_data = np.array([
+                (w[0].world, w[1].world)
+                    for w in data_list[len(data_list) // 8:]
+                ]).transpose((1, 0, 2, 3))
         
 
         self.train_fd = {
-            self.world_0.name: np.array([w.world for w in train_data[0]]),
-            self.world_goal.name: np.array([w.world for w in train_data[1]]),
+            self.world_0.name: train_data[0],
+            self.world_goal.name: train_data[1],
             self.temperature.name: self.cfg['temp_init'],
             self.straight_through.name: self.cfg['train_st'],
             self.dropout_rate.name: self.cfg['dropout_rate'],
             self.use_argmax.name: False,
         }
         self.test_fd = {
-            self.world_0.name: np.array([w.world for w in test_data[0]]),
-            self.world_goal.name: np.array([w.world for w in test_data[1]]),
+            self.world_0.name: test_data[0],
+            self.world_goal.name: test_data[1],
             self.temperature.name: self.cfg['temp_init'], # Unused
             self.straight_through.name: True, # Unused
             self.dropout_rate.name: 0., # Unused
@@ -359,12 +382,17 @@ class Linear:
 
                 if verbose:
                     # TODO Fix this redundancy
-                    loss = self.sess.run(
+                    train_loss = self.sess.run(
                             self.loss,
                             feed_dict=train_fd_use_argmax
                             )
+                    test_loss = self.sess.run(
+                            self.loss,
+                            feed_dict=self.test_fd
+                            )
                     print(f"superepoch {i // self.cfg['superepoch']}\t"
-                          f"training loss: {loss.mean():.3f}")
+                          f"train loss: {train_loss.mean():.3f}\t"
+                          f"test: {test_loss.mean():.3f}")
 
     def train(self, inputs, labels=None, verbose=False):
         # The labels are unused because they are the same as the input
@@ -399,8 +427,7 @@ class Linear:
         losses = np.apply_along_axis(np.average, -1, all_losses)
         # TODO Add accuracy
         if verbose:
-            print(f"test loss\t"
-                  f"avg: {np.average(losses):.3f}\t"
+            print(f"test loss: {np.average(losses):.3f}\t"
                   f"acc: {accuracy:.3f}")
 
     def examples(self, n):
@@ -520,14 +547,19 @@ class Linear:
                     self.world_goal.name: [x.world for x in np.transpose(e)[1]],
                     }
             # TODO Keep track of which ones are correct
-            raw_utts = self.sess.run(self.utterance, feed_dict=fd)
+            raw_utts, correct = self.sess.run((self.utterance, self.correct), feed_dict=fd)
             argmaxes = lambda x: [str(i)+':'+str(np.argmax(y)) for i, y in enumerate(x)]
-            utts = [z for y in [argmaxes(x) for x in raw_utts] for z in y]
+            #utts = [z for y in [argmaxes(utt) for utt, c in zip(raw_utts,
+                #correct) if c] for z in y]
+            utts = []
+            for c, utt in zip(correct, raw_utts):
+                if c:
+                    utts += argmaxes(utt)
             counts.append(Counter(utts))
             #print(counts)
         for i, x in enumerate(counts):
+            print(' ' * 5 * i, end='')
             for y in counts[i+1:]:
                 print(f'{util.get_word_alignment(x, y):.1f}', end='  ')
             print()
         import code; code.interact(local=locals())
-

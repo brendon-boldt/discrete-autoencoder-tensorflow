@@ -69,14 +69,17 @@ class Linear:
 
 
     def __init__(self, size, depth, n_objects=None, unique_objs=True):
-       self.size = size
-       self.depth = depth
-       self.unique_objs = unique_objs
-       if n_objects is not None:
+        self.size = size
+        self.depth = depth
+        self.unique_objs = unique_objs
+        if n_objects is not None:
            if unique_objs:
                self.world = self.make_world(n_objects)
            else:
                self.world = self.make_random_world(n_objects)
+        # This could cause problems since there are no immutability guarantees
+        self.hash_cache = None
+    
 
 
     def make_world(self, n_objects):
@@ -115,6 +118,11 @@ class Linear:
 
     def __eq__(self, other):
         return (self.world == other.world).all()
+
+    def __hash__(self):
+        if self.hash_cache is None:
+            self.hash_cache = hash(str(self.world))
+        return self.hash_cache
 
     def copy(self):
         w = Linear(self.size, self.depth, None, self.unique_objs)

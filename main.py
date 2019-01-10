@@ -32,13 +32,19 @@ def run_linear_model():
     if os.path.isdir(logdir):
         shutil.rmtree(logdir)
     model = em.LinearModel(cfg=model_cfg, logdir=logdir)
-    model.run(verbose=True)
+    model.run(verbose=False)
     model.test(verbose=True)
     #model.examples(10)
     #model.interactive_test_world()
     #model.interactive_test_utterance()
     #model.get_word_counts()
-    model.test_mutation_locality()
+    #model.test_mutation_locality()
 
 if __name__ == '__main__':
-    run_linear_model()
+    try:
+        #while True:
+        for _ in range(10):
+            tf.reset_default_graph()
+            run_linear_model()
+    except KeyboardInterrupt:
+        pass

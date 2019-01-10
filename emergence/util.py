@@ -12,4 +12,6 @@ def get_word_alignment(x, y):
     for k in x:
         total += x[k]
         matched += min(x[k], y.get(k, 0))
+    if total == 0:
+        return np.nan
     return matched / total
