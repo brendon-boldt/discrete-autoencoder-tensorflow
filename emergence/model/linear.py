@@ -220,14 +220,14 @@ class Linear:
         d_filter_w = tf.get_variable(
                 'd_filter_w',
                 initializer=tf.initializers.truncated_normal(mean=0.,
-                    # Fix this stupidity
+                    # TODO Fix this stupidity
                     stddev=1e-2)((1, 2, NUM_FILTERS)),
                 dtype=tf.float32,
                 )
 
         # Currently unused
         d_x_conv = tf.contrib.nn.conv1d_transpose(
-                d_x_prime,
+                d_x_conv,
                 d_filter_w,
                 #(batch_size, self.cfg['world_size'], 2),
                 (batch_size, self.cfg['world_size'], 2),
@@ -429,137 +429,3 @@ class Linear:
         if verbose:
             print(f"test loss: {np.average(losses):.3f}\t"
                   f"acc: {accuracy:.3f}")
-
-    def examples(self, n):
-        outputs, raw_utts = self.sess.run((self.d_output, self.utterance), feed_dict=self.test_fd)
-        argmaxes = lambda x: np.array([np.argmax(y) for y in x])
-        utts = np.array([argmaxes(x) for x in raw_utts])
-
-        indexes = [i for i, x in enumerate(utts) if x[0] == 0]
-        for i in range(min(n, outputs.shape[0])):
-            print(argmaxes(self.test_fd[self.world_0.name][indexes][i]))
-            print(argmaxes(self.test_fd[self.world_goal.name][indexes][i]))
-
-            print(utts[indexes][i])
-
-            print(argmaxes(outputs[indexes][i]))
-            print()
-
-    def interactive_test_world(self):
-        while True:
-            try:
-                oh_0 = [int(x) for x in input("w_0\t").split()]
-                oh_goal  = [int(x) for x in input("w_goal\t").split()]
-            except ValueError:
-                pass
-            if 99 in oh_0 or 99 in oh_goal:
-                break
-            oh_0 += [0]*(self.world_shape[0] - len(oh_0))
-            oh_goal += [0]*(self.world_shape[0] - len(oh_goal))
-            w_0 = np.zeros(self.world_shape)
-            w_goal = np.zeros(self.world_shape)
-            w_0[np.arange(self.world_shape[0]), oh_0] = 1
-            w_goal[np.arange(self.world_shape[0]), oh_goal] = 1
-
-            fd = {
-                    **self.test_fd,
-                    self.world_0.name: [w_0],
-                    self.world_goal.name: [w_goal], 
-                    }
-
-            outputs, raw_utts = self.sess.run((self.d_output, self.utterance),
-                    feed_dict=fd)
-            argmaxes = lambda x: np.array([np.argmax(y) for y in x])
-            utts = np.array([argmaxes(x) for x in raw_utts])
-            print(utts[0])
-            print(argmaxes(outputs[0]))
-
-    def interactive_test_utterance(self):
-        w_0 = World(*self.world_shape, self.cfg['world_init_objs'],
-                unique_objs=False)
-        while True:
-            try:
-                raw_utt = [int(x) for x in input("utt\t").split()]
-            except ValueError:
-                pass
-            if 99 in raw_utt:
-                break
-            if 98 in raw_utt:
-                w_0 = World(*self.world_shape, self.cfg['world_init_objs'],
-                        unique_objs=False)
-                continue
-
-            utt = np.zeros(
-                    (self.cfg['sentence_len'], self.cfg['vocab_size'])
-                    )
-            utt[np.arange(self.cfg['sentence_len']), raw_utt] = 1.
-
-            fd = {
-                    **self.test_fd,
-                    self.world_0.name: [w_0.world],
-                    #self.world_goal.name: [w_goal], 
-                    self.input_ph.name: [utt],
-                    }
-
-            outputs = self.sess.run(self.test_sigmoid,
-                    feed_dict=fd)
-            argmaxes = lambda x: np.array([np.argmax(y) for y in x])
-            print(' '.join(w_0))
-            print(' '.join(argmaxes(outputs[0])))
-            print()
-
-    def get_word_counts(self):
-        fd = {
-                **self.test_fd,
-                self.world_0.name: self.train_fd[self.world_0.name],
-                self.world_goal.name: self.train_fd[self.world_goal.name],
-                }
-        raw_utts = self.sess.run( self.utterance, feed_dict=fd)
-        argmaxes = lambda x: [str(i)+':'+str(np.argmax(y)) for i, y in enumerate(x)]
-        #utts = [z for y in [argmaxes(x) for x in raw_utts] for z in y]
-        utts = [str(argmaxes(x)) for x in raw_utts]
-        counts = Counter(utts)
-        import code; code.interact(local=locals())
-
-    def test_mutation_locality(self, n=100):
-        print("Generating examples...")
-        #mutation = World.create(5, 1)
-        #mutation = World.swap(3,-1)
-        mutations = []
-        for i in range(3):
-            mutations += [World.create(i, 1), World.destroy(i)]
-        examples = [[] for _ in mutations]
-        while min(len(e) for e in examples) < n:
-            w_0 = World(*self.world_shape, self.cfg['world_init_objs'],
-                    unique_objs=False)
-            for e, m in zip(examples, mutations):
-                w_1 = w_0.apply(m)
-                if w_0 != w_1 and len(e) < n:
-                    e.append((w_0, w_1))
-        #examples = np.reshape(examples, (len(examples)*n, 2)).transpose()
-        print("Done.")
-
-        counts = []
-        for e in examples:
-            fd = {
-                    **self.test_fd,
-                    self.world_0.name: [x.world for x in np.transpose(e)[0]],
-                    self.world_goal.name: [x.world for x in np.transpose(e)[1]],
-                    }
-            # TODO Keep track of which ones are correct
-            raw_utts, correct = self.sess.run((self.utterance, self.correct), feed_dict=fd)
-            argmaxes = lambda x: [str(i)+':'+str(np.argmax(y)) for i, y in enumerate(x)]
-            #utts = [z for y in [argmaxes(utt) for utt, c in zip(raw_utts,
-                #correct) if c] for z in y]
-            utts = []
-            for c, utt in zip(correct, raw_utts):
-                if c:
-                    utts += argmaxes(utt)
-            counts.append(Counter(utts))
-            #print(counts)
-        for i, x in enumerate(counts):
-            print(' ' * 5 * i, end='')
-            for y in counts[i+1:]:
-                print(f'{util.get_word_alignment(x, y):.1f}', end='  ')
-            print()
-        import code; code.interact(local=locals())

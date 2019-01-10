@@ -25,8 +25,7 @@ def run_binary_model():
 
 def run_linear_model():
     model_cfg = {
-        #'epochs': 20000,
-        #'dropout_rate': 0.5,
+        #'epochs': 200,
     }
     logdir = 'log'
     if os.path.isdir(logdir):
@@ -34,11 +33,12 @@ def run_linear_model():
     model = em.LinearModel(cfg=model_cfg, logdir=logdir)
     model.run(verbose=False)
     model.test(verbose=True)
-    #model.examples(10)
-    #model.interactive_test_world()
-    #model.interactive_test_utterance()
-    #model.get_word_counts()
-    #model.test_mutation_locality()
+
+    #em.explore.linear.examples(model, 10)
+    #em.explore.linear.interactive_test_world(model, )
+    #em.explore.linear.interactive_test_utterance(model, )
+    #em.explore.linear.get_word_counts(model, )
+    em.explore.linear.test_mutation_locality(model, )
 
 if __name__ == '__main__':
     try:
