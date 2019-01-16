@@ -5,14 +5,17 @@ from .. import util
 from ..world.linear import Linear as World
 
 def examples(model, n):
+    raise NotImplementedError
     outputs, raw_utts = model.sess.run((model.d_output, model.utterance), feed_dict=model.test_fd)
     argmaxes = lambda x: np.array([np.argmax(y) for y in x])
     utts = np.array([argmaxes(x) for x in raw_utts])
 
     indexes = [i for i, x in enumerate(utts) if x[0] == 0]
     for i in range(min(n, outputs.shape[0])):
-        print(argmaxes(model.test_fd[model.world_0.name][indexes][i]))
-        print(argmaxes(model.test_fd[model.world_goal.name][indexes][i]))
+        print(argmaxes(model.test_fd[model.next_batch][0][indexes][i]))
+        print(argmaxes(model.test_fd[model.next_batch][1][indexes][i]))
+        #print(argmaxes(model.test_fd[model.world_0.name][indexes][i]))
+        #print(argmaxes(model.test_fd[model.world_goal.name][indexes][i]))
 
         print(utts[indexes][i])
 
@@ -20,6 +23,7 @@ def examples(model, n):
         print()
 
 def interactive_test_world(model):
+    raise NotImplementedError
     while True:
         try:
             oh_0 = [int(x) for x in input("w_0\t").split()]
@@ -49,6 +53,7 @@ def interactive_test_world(model):
         print(argmaxes(outputs[0]))
 
 def interactive_test_utterance(model):
+    raise NotImplementedError
     w_0 = World(*model.world_shape, model.cfg['world_init_objs'],
             unique_objs=False)
     while True:
@@ -71,10 +76,10 @@ def interactive_test_utterance(model):
         fd = {
                 **model.test_fd,
                 model.world_0.name: [w_0.world],
-                model.input_ph.name: [utt],
+                model.d_only_utt.name: [utt],
                 }
 
-        outputs = model.sess.run(model.test_sigmoid,
+        outputs = model.sess.run(model.d_only_sigmoid,
                 feed_dict=fd)
         argmaxes = lambda x: np.array([np.argmax(y) for y in x])
         print(' '.join(str(x) for x in  w_0.as_argmax()))
@@ -82,19 +87,34 @@ def interactive_test_utterance(model):
         print()
 
 def get_word_counts(model):
-    fd = {
-            **model.test_fd,
-            model.world_0.name: model.train_fd[model.world_0.name],
-            model.world_goal.name: model.train_fd[model.world_goal.name],
-            }
-    raw_utts = model.sess.run( model.utterance, feed_dict=fd)
+    data = np.concatenate((
+            model.world_pairs_train,
+            model.world_pairs_valid,
+            model.world_pairs_test,
+            ))
+            
+    fd = {model.world_pair_ph: data}
+    model.sess.run(model.ds_eval_iter.initializer, feed_dict=fd)
+    raw_utts, correct = model.sess.run((model.utterance, model.correct), feed_dict=model.eval_fd)
+
+    raw_utts = [x for x, y in zip(raw_utts, correct) if y] 
     argmaxes = lambda x: [str(i)+':'+str(np.argmax(y)) for i, y in enumerate(x)]
     #utts = [z for y in [argmaxes(x) for x in raw_utts] for z in y]
     utts = [str(argmaxes(x)) for x in raw_utts]
-    counts = Counter(utts)
+    words = [str(x) for y in raw_utts for x in argmaxes(y)]
+    utt_counts = Counter(utts)
+    word_counts = Counter(words)
+    for k in utt_counts:
+        utt_counts[k] /= np.shape(raw_utts)[0]
+    for k in word_counts:
+        word_counts[k] /= (np.shape(raw_utts)[0] * np.shape(raw_utts)[1])
+        
+    print(utt_counts)
+    print(word_counts)
     import code; code.interact(local=locals())
 
 def test_mutation_locality(model, n=100):
+    raise NotImplementedError
     print("Generating examples...")
     #mutation = World.create(5, 1)
     #mutation = World.swap(3,-1)
@@ -137,3 +157,25 @@ def test_mutation_locality(model, n=100):
         print()
     import code; code.interact(local=locals())
 
+def mock_decode(world_0, utt):
+    w = world_0.copy()
+    if utt[0] == 0:
+        # Sakujo
+        w[(utt[1], utt[1]), (0, 1)] = 1, 0
+    elif utt[0] == 1:
+        # Create
+        w[(utt[1], utt[1]), (0, 1)] = 0, 1
+    elif utt[0] == 2:
+        # Swap right
+        temp = w[utt[1]]
+        w[utt[1]] = w[utt[1] + 1]
+        w[utt[1] + 1] = temp
+    elif utt[0] == 3:
+        # Swap left
+        temp = w[utt[1]]
+        w[utt[1]] = w[utt[1] - 1]
+        w[utt[1] - 1] = temp
+    return w
+
+def test_encoder_only(model):
+    pass
