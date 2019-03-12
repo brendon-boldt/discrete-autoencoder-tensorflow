@@ -5,7 +5,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (Reshape, Concatenate, Dense, Input, Lambda, Flatten, Conv1D)
 from tensorflow.keras.initializers import RandomNormal
 from tensorflow_probability.python.distributions import RelaxedOneHotCategorical
-from numpy.random import shuffle
+from numpy.random import shuffle, randint
 from numpy.linalg import matrix_rank
 from collections import Counter
 
@@ -18,23 +18,23 @@ class Linear:
     default_cfg = {
         # Actual batch_size == batch_size * num_concepts
         'batch_size': 20,
-        'iters': 40000,
+        'iters': 20000,
         'iters_per_epoch': 2000,
          # How often to anneal temperature
          # More like a traditional epoch due to small dataset size
-        'e_dense_size': 70,
-        'd_dense_size': 25,
-        'd_hidden_size': 70,
-        'world_size': 20,
-        'world_depth': 3,
+        'e_dense_size': 40,
+        'd_dense_size': 40,
+        'd_hidden_size': 40,
+        'world_size': 10,
+        'world_depth': 2,
         #'world_init_objs': 2,
-        'world_init_objs': 4,
+        'world_init_objs': (2,2+1),
         'conv_filters': 4,
-        'conv_kernel_size': 2,
-        'num_worlds': 40000,
+        'conv_kernel_size': 3,
+        'num_worlds': 20000,
 
         'sentence_len': 2,
-        'vocab_size': 25,
+        'vocab_size': 10,
 
         'learning_rate': 1e-2,
         'temp_init': 10,#3,
@@ -55,7 +55,6 @@ class Linear:
         self.stored_layers = {}
 
         self.sess = tf.Session()
-        #self.generate_train_and_test()
         self.initialize_graph()
         self.train_writer = tf.summary.FileWriter(
                 logdir + '/train',
@@ -86,39 +85,96 @@ class Linear:
 
         return tf.cond(self.straight_through, lambda: y, lambda: sample)
 
+    def init_eval_iter(self, worlds):
+        fd = {
+                self.world_placeholders[k]: v
+                for k, v in worlds.items()
+                }
+        self.sess.run(self.ds_eval_iter.initializer, feed_dict=fd)
+
     def initialize_datasets(self):
         data_set = set()
-        i = 0
+        attempts = 0
         while len(data_set) < self.cfg['num_worlds']:
-            w = World(*self.world_shape, self.cfg['world_init_objs'],
+            init_objs = randint(*self.cfg['world_init_objs'])
+            w = World(*self.world_shape, init_objs,
                     unique_objs=False)
-            #data_set.add((w, w.apply(World.random_swap1())))
-            data_set.add((w, w.apply(World.random_create())))
-            data_set.add((w, w.apply(World.random_destroy())))
-            #data_set.add((w, w))
-            i += 1
+            worlds = [w]
+            #w_create = w.apply(World.random_create())
+            #w_destroy = w.apply(World.random_destroy())
+            #w_swap = w.apply(World.random_swap1())
+
+            # TODO include random world
+
+            if attempts % 4 == 0:
+                worlds.append(w.apply(World.random_create()))
+            if attempts % 4 == 1:
+                worlds.append(w.apply(World.random_destroy()))
+            if attempts % 4 == 2:
+                worlds.append(w.apply(World.random_swap1()))
+            if attempts % 4 == 3:
+                while True:
+                    w_swap = w.apply(World.random_swap1())
+                    if w_swap != worlds[-1]:
+                        worlds.append(w_swap)
+                        break
+            # Add with cartesian product?
+            for i in range(len(worlds)):
+                for j in range(i, len(worlds)):
+                    data_set.add((
+                        w,
+                        worlds[i],
+                        worlds[j],
+                        i == j,
+                        ))
+            attempts += 1
             # TODO use better heruristic
-            if i >  2 * self.cfg['world_size'] ** 3:
+            if attempts >  2 * self.cfg['world_size'] ** 3:
                 if False:
                     print(f"Warning: only generated "
                     f"{len(data_set)}/{self.cfg['num_worlds']} worlds")
                 break
         print(len(data_set))
 
-        # TODO parameterize tt split
         data_list = list(data_set)
         shuffle(data_list)
-        data_list = np.array(
-                [(w[0].world, w[1].world) for w in data_list],
-                dtype=np.float32,
-                )
+        data_list = [
+                    (w[0].world, w[1].world, w[2].world, w[3])
+                    for w in data_list
+                    ]
         part_size = int(self.cfg['test_prop'] * len(data_list))
-        # Parameterize this
-        self.world_pairs_train = data_list[2 * part_size:]
-        self.world_pairs_test = data_list[:part_size]
-        self.world_pairs_valid = data_list[part_size:2 * part_size]
+        def to_dict(arr):
+            d = {
+                    'world_0': [],
+                    'world_goal': [],
+                    'world_target': [],
+                    'label': [],
+                    }
+            for tup in arr:
+                d['world_0'].append(tup[0])
+                d['world_goal'].append(tup[1])
+                d['world_target'].append(tup[2])
+                d['label'].append(tup[3])
+            return {
+                    'world_0': np.array(
+                        d['world_0'],
+                        dtype=np.float32),
+                    'world_goal': np.array(
+                        d['world_goal'],
+                        dtype=np.float32),
+                    'world_target': np.array(
+                        d['world_target'],
+                        dtype=np.float32),
+                    'label': np.array(
+                        d['label'],
+                        dtype=np.bool)
+                    }
 
-        # TODO make this an intializable iterator
+        self.world_pairs_train = to_dict(data_list[2 * part_size:])
+        self.world_pairs_test = to_dict(data_list[:part_size])
+        self.world_pairs_valid = to_dict(data_list[part_size:2 * part_size])
+
+        # TODO make this an intializable iterator if memory is an issue
         ds_train = tf.data.Dataset.from_tensor_slices(self.world_pairs_train)
         ds_train = ds_train.repeat()
         ds_train = ds_train.shuffle(self.cfg['iters'] * self.cfg['batch_size'])
@@ -126,12 +182,35 @@ class Linear:
         ds_train_iter = ds_train.make_one_shot_iterator()
         ds_train_handle = self.sess.run(ds_train_iter.string_handle())
 
-        self.world_pair_ph = tf.placeholder(
-                tf.float32, 
-                name="world_pairs",
-                shape=(None, 2, *self.world_shape),
-                )
-        ds_eval = tf.data.Dataset.from_tensors(self.world_pair_ph)
+        # Here I left off; I am pretty sure the next thing I wanted to do was
+        # to implement a classification game instead of reconstructing the
+        # world as the task. I also wanted to determine if there was
+        # a difference between learning against distractor images or just doing
+        # straight classfication.
+
+        self.world_placeholders = {
+                'world_0': tf.placeholder(
+                        tf.float32, 
+                        name="world_0",
+                        shape=(None, *self.world_shape),
+                        ),
+                'world_goal': tf.placeholder(
+                        tf.float32, 
+                        name="world_goal",
+                        shape=(None, *self.world_shape),
+                        ),
+                'world_target': tf.placeholder(
+                        tf.float32, 
+                        name="world_target",
+                        shape=(None, *self.world_shape),
+                        ),
+                'label': tf.placeholder(
+                        tf.bool, 
+                        name="world_label",
+                        shape=(None,),
+                        ),
+                }
+        ds_eval = tf.data.Dataset.from_tensors(self.world_placeholders)
         self.ds_eval_iter = ds_eval.make_initializable_iterator()
         ds_eval_handle = self.sess.run(self.ds_eval_iter.string_handle())
 
@@ -159,7 +238,7 @@ class Linear:
 
         return ds_iterator.get_next()
 
-    def initialize_encoder(self, world_pair):
+    def initialize_encoder(self, world_0, world_goal):
         e_conv = self.get_layer(
                 'e_conv',
                 Conv1D,
@@ -174,8 +253,8 @@ class Linear:
                 Flatten,
                 )
 
-        e_world_0 = e_conv_flatten(e_conv(world_pair[:, 0]))
-        e_world_goal = e_conv_flatten(e_conv(world_pair[:, 1]))
+        e_world_0 = e_conv_flatten(e_conv(world_0))
+        e_world_goal = e_conv_flatten(e_conv(world_goal))
 
         e_x = self.get_layer('e_concat', Concatenate)([e_world_0, e_world_goal])
         e_x = self.get_layer(
@@ -223,7 +302,7 @@ class Linear:
         utt_dropout = dropout_lambda(utterance)
         return utterance, utt_dropout
 
-    def initialize_decoder(self, utt_dropout, world_0):
+    def initialize_decoder(self, utt_dropout, world_0, world_target):
         weight_shape = (
                 1,
                 self.cfg['vocab_size'],
@@ -259,7 +338,7 @@ class Linear:
         #d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b)
         d_x = tf.matmul(utt_dropout_reshaped, tiled) + d_fc_b
         #d_x = tf.nn.relu(tf.matmul(utt_dropout_reshaped, tiled))
-        d_x = self.get_layer(
+        d_utt_hidden = self.get_layer(
                 'decoder_flatten',
                 Flatten,
                 )(d_x)
@@ -271,56 +350,55 @@ class Linear:
                 activation='relu',
                 use_bias=False,
                 )
+        d_conv_flatten = self.get_layer(
+                'd_conv_flatten',
+                Flatten,
+                )
 
-        d_x = self.get_layer(
+        w_0_flat = d_conv_flatten(d_conv(world_0))
+        w_target_flat = d_conv_flatten(d_conv(world_target))
+
+        d_world_combined = self.get_layer(
                 'd_concat',
                 Concatenate,
-                )([d_x, Flatten(name='e_conv_flatten')(d_conv(world_0))])
+                )([w_0_flat, w_target_flat])
 
         # I do not know if I need to get_layer() this
-        d_x = tf.layers.batch_normalization(d_x, renorm=True)
+        # Where to add this back in?
+        #d_x = tf.layers.batch_normalization(d_x, renorm=True)
 
-        NUM_FILTERS = 8
-        d_x = self.get_layer(
-                'd_hidden',
+        d_utt_embed = self.get_layer(
+                'd_utt_to_embed',
                 Dense,
                 self.cfg['d_hidden_size'],
-                #self.cfg['world_size']*NUM_FILTERS,
                 activation='relu',
-                )(d_x)
+                )(d_utt_hidden)
+        d_world_embed = self.get_layer(
+                'd_world_to_embed',
+                Dense,
+                self.cfg['d_hidden_size'],
+                activation='relu',
+                )(d_world_combined)
+
+        d_everything = self.get_layer(
+                'd_concat_final',
+                Concatenate,
+                )([d_world_embed, d_utt_embed])
+
+        # One article said to check out CCA
 
         # Currently unused
         #d_x_conv = Reshape((self.cfg['world_size'], NUM_FILTERS))(d_x)
 
-        #d_filter_w = tf.get_variable(
-        #        'd_filter_w',
-        #        initializer=tf.initializers.truncated_normal(mean=0.,
-        #            # TODO Fix this stupidity
-        #            stddev=1e-2)((1, 2, NUM_FILTERS)),
-        #        dtype=tf.float32,
-        #        )
-
-        ## Currently unused
-        #d_x_conv = tf.contrib.nn.conv1d_transpose(
-        #        d_x_conv,
-        #        d_filter_w,
-        #        #(batch_size, self.cfg['world_size'], 2),
-        #        (batch_size, self.cfg['world_size'], 2),
-        #        1,
-        #        name='d_conv_transpose',
-        #        )
-
         d_x = self.get_layer(
                 "decoder_class",
                 Dense,
-                np.prod(self.world_shape),
+                1,
                 activation=None,
                 use_bias=False,
-                )(d_x)
-        #d_output = d_x_prime
-        d_output = tf.reshape(d_x, (-1,) + self.world_shape)
-        d_sigmoid = tf.nn.sigmoid(d_output)
-        return d_output, d_sigmoid
+                )(d_everything)
+
+        return tf.squeeze(d_x)
 
     def initialize_graph(self):
         with tf.variable_scope("hyperparameters", reuse=tf.AUTO_REUSE):
@@ -334,43 +412,54 @@ class Linear:
                     name='straight_through')
 
         with tf.variable_scope("dataset", reuse=tf.AUTO_REUSE):
-            world_pair_out = self.initialize_datasets()
+            inputs = self.initialize_datasets()
             # For debugging
-            self.world_pair_out = world_pair_out
+            self.inputs = inputs
 
         with tf.name_scope("environment"):
             with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
-                self.e_raw_output = self.initialize_encoder(world_pair_out)
+                self.e_raw_output = self.initialize_encoder(
+                        inputs['world_0'],
+                        inputs['world_goal'],
+                        )
             with tf.variable_scope("communication", reuse=tf.AUTO_REUSE):
                 self.utterance, self.utt_dropout = self.initialize_communication(self.e_raw_output)
             with tf.variable_scope("decoder", reuse=tf.AUTO_REUSE):
-                self.d_output, self.d_sigmoid = self.initialize_decoder(self.utt_dropout, world_pair_out[:, 0])
-
-                self.d_only_utt = tf.placeholder(name='d_only_utt',
-                        shape=self.utt_dropout.shape, dtype=tf.float32)
-                self.d_only_output, self.d_only_sigmoid = self.initialize_decoder(
-                        self.d_only_utt,
-                        world_pair_out[:, 0]
+                #self.d_output, self.d_sigmoid = self.initialize_decoder(self.utt_dropout, inputs['world_0'])
+                self.d_output = self.initialize_decoder(
+                        self.utt_dropout,
+                        inputs['world_0'],
+                        inputs['world_target']
                         )
+
+                #self.d_only_utt = tf.placeholder(name='d_only_utt',
+                #        shape=self.utt_dropout.shape, dtype=tf.float32)
+                #self.d_only_output, self.d_only_sigmoid = self.initialize_decoder(
+                #        self.d_only_utt,
+                #        inputs['world_0']
+                #        )
 
         with tf.variable_scope("training", reuse=tf.AUTO_REUSE):
             optmizier = tf.train.AdamOptimizer(self.cfg['learning_rate'])
             self.loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                    logits=self.d_output, labels=world_pair_out[:, 1])
+                    labels=tf.cast(inputs['label'], tf.float32),
+                    logits=self.d_output,
+                    )
             tf.summary.scalar('loss', tf.reduce_mean(self.loss))
             self.train_step = optmizier.minimize(self.loss)
 
-            d_only_optimizer = tf.train.AdamOptimizer(self.cfg['learning_rate'])
-            # TODO
-            d_only_loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                    logits=self.d_only_output, labels=world_pair_out[:, 1])
-            self.d_only_train_step = d_only_optimizer.minimize(d_only_loss)
+            #d_only_optimizer = tf.train.AdamOptimizer(self.cfg['learning_rate'])
+            #d_only_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+            #        logits=self.d_only_output,
+            #        labels=inputs['world_goal']
+            #        )
+            #self.d_only_train_step = d_only_optimizer.minimize(d_only_loss)
 
         with tf.variable_scope("evaluation", reuse=tf.AUTO_REUSE):
             word_correct = tf.cast(
                     tf.math.equal(
                             tf.argmax(self.d_output, -1),
-                            tf.argmax(world_pair_out[:, 1], -1),
+                            tf.argmax(inputs['world_goal'], -1),
                             ),
                     tf.int32
                     )
@@ -407,8 +496,7 @@ class Linear:
                 # TODO find a better way to record this
                 summary = tf.Summary(value=[tf.Summary.Value(tag="training/loss", simple_value=train_loss)])
                 self.train_writer.add_summary(summary, i)
-                self.sess.run(self.ds_eval_iter.initializer,
-                        feed_dict={self.world_pair_ph: self.world_pairs_valid})
+                self.init_eval_iter(self.world_pairs_valid)
                 summary, valid_loss = self.sess.run((self.summary, self.loss), feed_dict=self.eval_fd)
                 self.valid_writer.add_summary(summary, i)
 
@@ -420,12 +508,15 @@ class Linear:
         self.test(verbose=True)
 
     def test(self, verbose=False):
-        self.sess.run(self.ds_eval_iter.initializer,
-                feed_dict={self.world_pair_ph: self.world_pairs_test})
-        all_losses, accuracy = self.sess.run(
-                (self.loss, self.accuracy), feed_dict=self.eval_fd
+        self.init_eval_iter(self.world_pairs_test)
+        all_losses = self.sess.run(
+                self.loss, feed_dict=self.eval_fd
                 )
+        #all_losses, accuracy = self.sess.run(
+        #        (self.loss, self.accuracy), feed_dict=self.eval_fd
+        #        )
         losses = np.apply_along_axis(np.average, -1, all_losses)
         if verbose:
-            print(f"test acc: {accuracy:.3f}\t"
-                  f"loss: {np.average(losses):.3f}")
+            print(f"loss: {np.average(losses):.3f}")
+            #print(f"test acc: {accuracy:.3f}\t"
+            #      f"loss: {np.average(losses):.3f}")

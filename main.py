@@ -32,7 +32,7 @@ def run_linear_model():
     if os.path.isdir(logdir):
         shutil.rmtree(logdir)
     model = em.LinearModel(cfg=model_cfg, logdir=logdir)
-    model.run(verbose=False)
+    model.run(verbose=True)
 
     #em.explore.linear.examples(model, 10)
     #em.explore.linear.interactive_test_world(model, )
